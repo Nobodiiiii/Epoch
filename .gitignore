@@ -1,0 +1,38 @@
+# Local Minecraft instances, saves, dependencies, and launcher state.
+/.minecraft/
+/instances/
+/assets/
+/libraries/
+/versions/
+/launcher_profiles.json
+
+# Generated build output and local caches. Gradle wrappers and bundled native
+# runtime libraries are intentionally tracked with their source/build scripts.
+**/.gradle/
+**/build/
+**/run/
+*.class
+**/build*.txt
+**/gradle.log
+**/*.zip
+*.log
+__pycache__/
+host/native/glfw-lwjgl/
+host/native/glfw-3.3.9/
+host/native/build-lwjgl/
+host/native/dependencies/
+host/native/export-verification*.json
+**/build-log.txt
+**/javac.args
+
+# One-off migration scripts retained locally; their changes are in source.
+forge116/adapt.py
+forge116/exportperf.py
+forge116/finalfixes.py
+forge116/fixes.py
+forge116/freezefix.py
+forge116/itemtestfix.py
+forge116/readyfix.py
+forge116/resources.py
+forge116/safety.py
+forge116/testedit.py

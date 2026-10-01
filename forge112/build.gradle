@@ -1,0 +1,19 @@
+plugins { id 'net.minecraftforge.gradle' version '6.0.54' }
+version = '0.3.0'
+group = 'dev.epoch'
+base { archivesName = 'epoch-1.12.2' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(8)
+minecraft { mappings channel: 'stable', version: '39-1.12' }
+sourceSets.main.java.srcDir '../src/shared/java'
+sourceSets.main.resources.srcDir '../src/shared/resources'
+dependencies { minecraft 'net.minecraftforge:forge:1.12.2-14.23.5.2860' }
+repositories { maven { url = uri('../.minecraft/libraries'); metadataSources { artifact() } } }
+tasks.named('jar', Jar).configure { finalizedBy 'reobfJar' }
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.register('protocolSmoke', JavaExec) {
+ dependsOn tasks.named('testClasses')
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'dev.epoch.LegacyProtocolSmoke'
+ javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+ workingDir = layout.buildDirectory
+}

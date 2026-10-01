@@ -1,0 +1,19 @@
+plugins {
+ id 'java-library'
+ id 'com.gtnewhorizons.retrofuturagradle' version '1.4.9'
+}
+version = '0.3.0'
+group = 'dev.epoch'
+base { archivesName = 'epoch-1.7.10' }
+java.toolchain.languageVersion = JavaLanguageVersion.of(8)
+minecraft { mcVersion.set('1.7.10') }
+sourceSets.main.java.srcDir '../src/shared/java'
+sourceSets.main.resources.srcDir '../src/shared/resources'
+tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+tasks.register('testLegacy', JavaExec) {
+ dependsOn 'testClasses'
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'dev.epoch.LegacyTestLauncher'
+ javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+}
+tasks.named('check') { dependsOn 'testLegacy' }

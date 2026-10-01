@@ -1,0 +1,21 @@
+modLoader="javafml"
+loaderVersion="[40,)"
+license="All Rights Reserved"
+[[mods]]
+modId="epoch"
+version="0.3.0"
+displayName="Epoch"
+authors="Epoch"
+description="Single-player cross-version world bridge."
+[[dependencies.epoch]]
+modId="forge"
+mandatory=true
+versionRange="[40.3.12,41)"
+ordering="NONE"
+side="BOTH"
+[[dependencies.epoch]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.18.2,1.19)"
+ordering="NONE"
+side="BOTH"

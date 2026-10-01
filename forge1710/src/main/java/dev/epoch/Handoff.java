@@ -1,0 +1,96 @@
+package dev.epoch;
+
+import cpw.mods.fml.common.FMLCommonHandler;
+import cpw.mods.fml.common.eventhandler.SubscribeEvent;
+import cpw.mods.fml.common.gameevent.TickEvent;
+import dev.epoch.bridge.*;
+import net.minecraft.block.Block;
+import net.minecraft.client.Minecraft;
+import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.init.*;
+import net.minecraft.inventory.IInventory;
+import net.minecraft.item.*;
+import net.minecraft.nbt.*;
+import net.minecraft.network.play.server.*;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.tileentity.*;
+import net.minecraft.world.WorldServer;
+import java.nio.file.*;
+import java.util.*;
+
+public final class Handoff {
+ private boolean frozen,announced;
+ @SubscribeEvent public void tick(TickEvent.ServerTickEvent event){
+  if(event.phase!=TickEvent.Phase.END)return;MinecraftServer server=FMLCommonHandler.instance().getMinecraftServerInstance();if(server==null||server.isDedicatedServer())return;
+  if(!announced&&!server.getConfigurationManager().playerEntityList.isEmpty()){announced=true;ClientHooks.bridge().status("","READY","Integrated world ready; shared 64 x 64 region");}
+  do{BridgeFiles.Command cmd=ClientHooks.bridge().poll();if(cmd!=null)try{handle(server,cmd);}catch(Exception error){if("export".equals(cmd.action)||"import".equals(cmd.action))frozen=true;ClientHooks.bridge().status(cmd.id,"ERROR",error.toString());error.printStackTrace();}if(frozen)try{server.func_147137_ag().networkTick();Thread.sleep(10);}catch(Exception error){ClientHooks.bridge().diagnostics.put("frozenLoopError",error.toString());}}while(frozen&&server.isServerRunning());
+ }
+ void handle(MinecraftServer server,BridgeFiles.Command cmd)throws Exception{
+  switch(cmd.action){case "export":{frozen=true;double[] camera=ClientHooks.captureFrozen();Snapshot snap=exportWorld(server);snap.x=camera[0];snap.y=camera[1];snap.z=camera[2];snap.yaw=(float)camera[3];snap.pitch=(float)camera[4];snap.write(Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"EXPORTED","Snapshot committed; simulation frozen");break;}case "import":frozen=true;ClientHooks.freezeCurrent();importWorld(server,Snapshot.read(Paths.get(cmd.path)));ClientHooks.markImported(cmd.id);break;case "freeze":frozen=true;ClientHooks.freezeCurrent();ClientHooks.bridge().status(cmd.id,"FROZEN","Simulation frozen");break;case "resume":frozen=false;ClientHooks.resumeAt=System.currentTimeMillis()+400;ClientHooks.bridge().status(cmd.id,"READY","Simulation resumed");break;case "catalog":ClientHooks.catalog();ClientHooks.bridge().status(cmd.id,"CATALOG","Instance catalog in diagnostics");break;case "select":ClientHooks.select(cmd.path);ClientHooks.bridge().status(cmd.id,"SELECTED","Target requested");break;case "usekey":ClientHooks.useKey(cmd.id);ClientHooks.bridge().status(cmd.id,"KEY_TRIGGERED","Actual key use scheduled");break;case "probe":probe(server);ClientHooks.bridge().status(cmd.id,"PROBED","Probe in diagnostics");break;case "testsetup":testsetup(server);ClientHooks.bridge().status(cmd.id,"READY","Lab prepared");break;case "testedit":server.worldServerForDimension(0).setBlockToAir(0,64,3);server.worldServerForDimension(0).setBlock(1,64,3,Blocks.dirt,0,2);sendChunks(server.worldServerForDimension(0),player(server));probe(server);ClientHooks.bridge().status(cmd.id,frozen?"FROZEN":"READY","Edited lab");break;case "shutdown":frozen=false;ClientHooks.execute(()->Minecraft.getMinecraft().shutdown());break;default:throw new IllegalArgumentException("Unknown action "+cmd.action);}
+ }
+ EntityPlayerMP player(MinecraftServer server){if(server.getConfigurationManager().playerEntityList.size()!=1)throw new IllegalStateException("Epoch requires one player");EntityPlayerMP p=(EntityPlayerMP)server.getConfigurationManager().playerEntityList.get(0);if(p.dimension!=0)throw new IllegalStateException("Epoch supports Overworld only");if(p.posX< -32||p.posX>=32||p.posZ< -32||p.posZ>=32||p.posY<0||p.posY>=256)throw new IllegalStateException("Outside shared region [-32,32), y [0,256)");return p;}
+ Snapshot exportWorld(MinecraftServer server)throws Exception{
+  EntityPlayerMP p=player(server);WorldServer world=server.worldServerForDimension(0);Snapshot s=new Snapshot();s.version=Epoch.VERSION;s.x=p.posX;s.y=p.posY;s.z=p.posZ;s.yaw=p.rotationYaw;s.pitch=p.rotationPitch;s.gameTime=world.getTotalWorldTime();s.dayTime=world.getWorldTime();s.selectedSlot=p.inventory.currentItem;
+  NBTTagCompound inventory=new NBTTagCompound();inventory.setTag("Items",p.inventory.writeToNBT(new NBTTagList()));LegacyNbt.Tag inv=LegacyNbt.from(inventory);convertItems(inv,true);s.inventory=LegacyNbt.encode(LegacyNbt.map(inv).get("Items"));
+  Map<String,Integer> ids=new HashMap<String,Integer>();Map<Integer,String> stateCache=new HashMap<Integer,String>();List<Integer> runs=new ArrayList<Integer>();int previous=-1,count=0;
+  for(int y=0;y<256;y++)for(int z=-32;z<32;z++)for(int x=-32;x<32;x++){int index=(y*64+z+32)*64+x+32;Block block=world.getBlock(x,y,z);int meta=world.getBlockMetadata(x,y,z),key=Block.getIdFromBlock(block)*16+meta;String state=stateCache.get(key);if(state==null){state=LegacyStates.encode(block,meta);stateCache.put(key,state);}TileEntity tile=world.getTileEntity(x,y,z);String nbt=null;
+   if(tile instanceof Epoch.UnknownTile&&!((Epoch.UnknownTile)tile).originalState.isEmpty()){Epoch.UnknownTile u=(Epoch.UnknownTile)tile;state=u.originalState;nbt=u.originalNbt.isEmpty()?null:u.originalNbt;}else if(tile!=null){NBTTagCompound tag=new NBTTagCompound();tile.writeToNBT(tag);LegacyNbt.Tag canonical=LegacyNbt.from(tag);convertTile(canonical,true);nbt=LegacyNbt.encode(canonical);}if(nbt!=null)s.blockEntities.put(Integer.toString(index),nbt);Integer id=ids.get(state);if(id==null){id=s.palette.size();ids.put(state,id);s.palette.add(state);}if(previous==id)count++;else{if(count>0){runs.add(previous);runs.add(count);}previous=id;count=1;}}
+  if(count>0){runs.add(previous);runs.add(count);}s.runs=new int[runs.size()];for(int i=0;i<runs.size();i++)s.runs[i]=runs.get(i);return s;
+ }
+ static final Map<String,String> TILE_IDS=new LinkedHashMap<String,String>();static{TILE_IDS.put("Furnace","minecraft:furnace");TILE_IDS.put("Chest","minecraft:chest");TILE_IDS.put("EnderChest","minecraft:ender_chest");TILE_IDS.put("RecordPlayer","minecraft:jukebox");TILE_IDS.put("Trap","minecraft:dispenser");TILE_IDS.put("Dropper","minecraft:dropper");TILE_IDS.put("Sign","minecraft:sign");TILE_IDS.put("MobSpawner","minecraft:mob_spawner");TILE_IDS.put("Music","minecraft:noteblock");TILE_IDS.put("Piston","minecraft:piston");TILE_IDS.put("Cauldron","minecraft:brewing_stand");TILE_IDS.put("EnchantTable","minecraft:enchanting_table");TILE_IDS.put("Airportal","minecraft:end_portal");TILE_IDS.put("Control","minecraft:command_block");TILE_IDS.put("Beacon","minecraft:beacon");TILE_IDS.put("Skull","minecraft:skull");TILE_IDS.put("DLDetector","minecraft:daylight_detector");TILE_IDS.put("Hopper","minecraft:hopper");TILE_IDS.put("Comparator","minecraft:comparator");TILE_IDS.put("FlowerPot","minecraft:flower_pot");}
+ static void convertTile(LegacyNbt.Tag tag,boolean modern)throws Exception{Map<String,LegacyNbt.Tag> data=LegacyNbt.map(tag);String id=LegacyNbt.string(data.get("id")),mapped=modern?TILE_IDS.get(id):null;if(!modern)for(Map.Entry<String,String> e:TILE_IDS.entrySet())if(e.getValue().equals(id)){mapped=e.getKey();break;}if(mapped!=null)data.put("id",new LegacyNbt.Tag(8,mapped));convertItems(tag,modern);}
+ static void convertItems(LegacyNbt.Tag tag,boolean modern)throws Exception{
+  if(tag.type==9){for(LegacyNbt.Tag child:LegacyNbt.list(tag))convertItems(child,modern);return;}if(tag.type!=10)return;Map<String,LegacyNbt.Tag> data=LegacyNbt.map(tag);
+  if(data.containsKey("Count")&&data.containsKey("id")){
+   LegacyNbt.Tag id=data.get("id");if(modern&&id.type!=8){Item item=Item.getItemById(((Number)id.value).intValue());if(item==null)throw new IllegalArgumentException("Unknown numeric item "+id.value);String name=String.valueOf(Item.itemRegistry.getNameForObject(item));int damage=data.containsKey("Damage")?((Number)data.get("Damage").value).intValue():0;
+    if(name.equals("epoch:unknown_block")){data.remove("Damage");}else if(item instanceof ItemBlock){String state=LegacyStates.encode(Block.getBlockFromItem(item),damage);LegacyNbt.Tag stateTag=LegacyNbt.parse(state);if(!LegacyNbt.map(stateTag).containsKey("EpochLegacyVersion")){name=LegacyNbt.string(LegacyNbt.map(stateTag).get("Name"));data.remove("Damage");}else throw new IllegalArgumentException("Block item metadata cannot be converted: "+name+":"+damage);}else if(item.isDamageable()){LegacyNbt.Tag extra=data.get("tag");if(extra==null){extra=LegacyNbt.compound();data.put("tag",extra);}LegacyNbt.map(extra).put("Damage",new LegacyNbt.Tag(3,damage));data.remove("Damage");}else if(damage==0)data.remove("Damage");else throw new IllegalArgumentException("Legacy item variant cannot be converted safely: "+name+":"+damage);
+    if(name.equals("minecraft:reeds"))name="minecraft:sugar_cane";if(name.equals("minecraft:sign"))name="minecraft:oak_sign";data.put("id",new LegacyNbt.Tag(8,name));
+   }else if(!modern&&id.type==8){String name=(String)id.value;if(name.equals("minecraft:sugar_cane"))name="minecraft:reeds";if(name.equals("minecraft:oak_sign"))name="minecraft:sign";Object value=Item.itemRegistry.getObject(name);Item item=value instanceof Item?(Item)value:null;int meta=0;if(item==null){LegacyNbt.Tag state=LegacyNbt.compound();LegacyNbt.map(state).put("Name",new LegacyNbt.Tag(8,(String)id.value));LegacyStates.State mapped=LegacyStates.decodeItem((String)id.value);if(mapped!=null){item=Item.getItemFromBlock(mapped.block);meta=mapped.meta;}}if(item==null||!Item.itemRegistry.containsKey(Item.itemRegistry.getNameForObject(item)))throw new IllegalArgumentException("Item unavailable in 1.7.10: "+id.value);data.put("id",new LegacyNbt.Tag(2,(short)Item.getIdFromItem(item)));if(!data.containsKey("Damage")){LegacyNbt.Tag extra=data.get("tag");if(item.isDamageable()&&extra!=null&&LegacyNbt.map(extra).containsKey("Damage"))meta=((Number)LegacyNbt.map(extra).get("Damage").value).intValue();data.put("Damage",new LegacyNbt.Tag(2,(short)meta));}}
+  }
+  for(LegacyNbt.Tag child:new ArrayList<LegacyNbt.Tag>(data.values()))convertItems(child,modern);
+ }
+ static NBTTagList prepareInventory(String text)throws Exception{
+  LegacyNbt.Tag expected=LegacyNbt.parse(text);
+  if(expected.type!=9)throw new IllegalArgumentException("Inventory must be an NBT list");
+  Set<Integer> occupied=new HashSet<Integer>();
+  for(LegacyNbt.Tag entry:LegacyNbt.list(expected)){
+   if(entry.type!=10)throw new IllegalArgumentException("Inventory entries must be compounds");
+   LegacyNbt.Tag slotTag=LegacyNbt.map(entry).get("Slot");
+   if(slotTag==null||slotTag.type!=1)throw new IllegalArgumentException("Inventory Slot must be a byte");
+   int slot=((Number)slotTag.value).intValue()&255;
+   if(!((slot>=0&&slot<36)||(slot>=100&&slot<104)))throw new IllegalArgumentException("Inventory slot "+slot+" is unavailable in Minecraft 1.7.10; empty the offhand before switching");
+   if(!occupied.add(slot))throw new IllegalArgumentException("Duplicate inventory slot "+slot);
+  }
+  LegacyNbt.Tag inventory=LegacyNbt.compound();LegacyNbt.map(inventory).put("Items",LegacyNbt.parse(text));convertItems(inventory,false);
+  NBTTagList result=LegacyNbt.nativeTag(inventory).getTagList("Items",10);
+  for(int i=0;i<result.tagCount();i++){
+   NBTTagCompound entry=result.getCompoundTagAt(i);ItemStack stack=ItemStack.loadItemStackFromNBT(entry);
+   if(stack==null||stack.stackSize<=0)throw new IllegalArgumentException("Inventory stack cannot be represented in Minecraft 1.7.10");
+   NBTTagCompound serialized=new NBTTagCompound();stack.writeToNBT(serialized);serialized.setByte("Slot",entry.getByte("Slot"));
+   LegacyNbt.Tag restored=LegacyNbt.from(serialized);convertItems(restored,true);
+   if(!LegacyNbt.preserves(LegacyNbt.list(expected).get(i),restored))throw new IllegalArgumentException("Inventory payload cannot roundtrip without loss in Minecraft 1.7.10");
+  }
+  return result;
+ }
+ void importWorld(MinecraftServer server,Snapshot s)throws Exception{
+  if(s.schema!=1||s.x0!=-32||s.z0!=-32||s.y0!=0||s.sizeX!=64||s.sizeZ!=64||s.sizeY!=256)throw new IllegalArgumentException("Unsupported snapshot bounds");EntityPlayerMP p=player(server);WorldServer world=server.worldServerForDimension(0);LegacyStates.State[] palette=new LegacyStates.State[s.palette.size()];for(int i=0;i<palette.length;i++)palette[i]=LegacyStates.decode(s.palette.get(i));
+  Map<Integer,TileEntity> prepared=new HashMap<Integer,TileEntity>();Set<Integer> incompatible=new HashSet<Integer>();int planned=0;
+  for(int r=0;r<s.runs.length;r+=2){LegacyStates.State state=palette[s.runs[r]];for(int n=0;n<s.runs[r+1];n++,planned++){String text=s.blockEntities.get(Integer.toString(planned));if(text==null||state==null)continue;try{if(!state.block.hasTileEntity(state.meta))throw new IllegalArgumentException("No tile factory");TileEntity fresh=state.block.createTileEntity(world,state.meta);if(fresh==null)throw new IllegalArgumentException("No tile");LegacyNbt.Tag canonical=LegacyNbt.parse(text);convertTile(canonical,false);NBTTagCompound tag=LegacyNbt.nativeTag(canonical),identity=new NBTTagCompound();fresh.writeToNBT(identity);if(!identity.getString("id").equals(tag.getString("id")))throw new IllegalArgumentException("Tile type mismatch");tag.setInteger("x",planned%64-32);tag.setInteger("y",planned/4096);tag.setInteger("z",planned/64%64-32);fresh.readFromNBT(tag);NBTTagCompound roundtrip=new NBTTagCompound();fresh.writeToNBT(roundtrip);LegacyNbt.Tag restored=LegacyNbt.from(roundtrip);convertTile(restored,true);LegacyNbt.Tag expected=LegacyNbt.parse(text);LegacyNbt.map(expected).put("x",new LegacyNbt.Tag(3,planned%64-32));LegacyNbt.map(expected).put("y",new LegacyNbt.Tag(3,planned/4096));LegacyNbt.map(expected).put("z",new LegacyNbt.Tag(3,planned/64%64-32));if(!LegacyNbt.preserves(expected,restored))throw new IllegalArgumentException("Tile NBT cannot roundtrip without loss");prepared.put(planned,fresh);}catch(Exception error){incompatible.add(planned);}}}
+  // Validate inventory before any world mutation. Unknown inventory items abort safely.
+  NBTTagList nativeInventory=prepareInventory(s.inventory);
+  ClientHooks.freezeAt(s.x,s.y,s.z,s.yaw,s.pitch);int index=0,unknowns=0;
+  for(int r=0;r<s.runs.length;r+=2){int id=s.runs[r];LegacyStates.State state=palette[id];for(int n=0;n<s.runs[r+1];n++,index++){int x=index%64-32,y=index/4096,z=index/64%64-32;boolean unknown=state==null||incompatible.contains(index);Block block=unknown?Epoch.UNKNOWN:state.block;int meta=unknown?0:state.meta;TileEntity previous=world.getTileEntity(x,y,z);if(previous instanceof IInventory){IInventory inv=(IInventory)previous;for(int slot=0;slot<inv.getSizeInventory();slot++)inv.setInventorySlotContents(slot,null);}world.removeTileEntity(x,y,z);if(world.getBlock(x,y,z)!=block||world.getBlockMetadata(x,y,z)!=meta)world.setBlock(x,y,z,block,meta,2);if(block.hasTileEntity(meta)){TileEntity fresh=unknown?new Epoch.UnknownTile():prepared.get(index);if(fresh==null)fresh=block.createTileEntity(world,meta);if(fresh==null)throw new IllegalStateException("Cannot create tile");if(unknown){Epoch.UnknownTile u=(Epoch.UnknownTile)fresh;u.originalState=s.palette.get(id);String text=s.blockEntities.get(Integer.toString(index));u.originalNbt=text==null?"":text;u.sourceVersion=s.version;}world.setTileEntity(x,y,z,fresh);fresh.markDirty();}if(unknown)unknowns++;}}
+  // Legacy onBlockAdded (especially chests) may overwrite the requested metadata.
+  int finalIndex=0;for(int r=0;r<s.runs.length;r+=2){LegacyStates.State desired=palette[s.runs[r]];for(int n=0;n<s.runs[r+1];n++,finalIndex++){if(desired==null||incompatible.contains(finalIndex))continue;int bx=finalIndex%64-32,by=finalIndex/4096,bz=finalIndex/64%64-32;if(world.getBlock(bx,by,bz)==desired.block&&world.getBlockMetadata(bx,by,bz)!=desired.meta)world.setBlockMetadataWithNotify(bx,by,bz,desired.meta,2);}}
+  world.setWorldTime(s.dayTime);world.getWorldInfo().incrementTotalWorldTime(s.gameTime);p.playerNetServerHandler.setPlayerLocation(s.x,s.y,s.z,s.yaw,s.pitch);p.inventory.readFromNBT(nativeInventory);p.inventory.currentItem=s.selectedSlot;p.inventoryContainer.detectAndSendChanges();p.playerNetServerHandler.sendPacket(new S09PacketHeldItemChange(s.selectedSlot));p.playerNetServerHandler.sendPacket(new S03PacketTimeUpdate(s.gameTime,s.dayTime,world.getGameRules().getGameRuleBooleanValue("doDaylightCycle")));sendChunks(world,p);ClientHooks.bridge().diagnostics.put("unknownBlocks",unknowns);
+ }
+ void sendChunks(WorldServer world,EntityPlayerMP player){for(int cz=-2;cz<2;cz++)for(int cx=-2;cx<2;cx++){net.minecraft.world.chunk.Chunk chunk=world.getChunkFromChunkCoords(cx,cz);chunk.generateSkylightMap();chunk.setChunkModified();player.playerNetServerHandler.sendPacket(new S21PacketChunkData(chunk,true,65535));for(Object value:chunk.chunkTileEntityMap.values()){net.minecraft.network.Packet packet=((TileEntity)value).getDescriptionPacket();if(packet!=null)player.playerNetServerHandler.sendPacket(packet);}}}
+ void probe(MinecraftServer server)throws Exception{WorldServer world=server.worldServerForDimension(0);for(int x=-1;x<=2;x++){ClientHooks.bridge().diagnostics.put("block_"+x,LegacyStates.encode(world.getBlock(x,64,3),world.getBlockMetadata(x,64,3)));TileEntity tile=world.getTileEntity(x,64,3);if(tile!=null){NBTTagCompound tag=new NBTTagCompound();tile.writeToNBT(tag);ClientHooks.bridge().diagnostics.put("nbt_"+x,LegacyNbt.encode(tag));}}EntityPlayerMP p=player(server);ClientHooks.bridge().diagnostics.put("camera",Arrays.asList(p.posX,p.posY,p.posZ,p.rotationYaw,p.rotationPitch));int count=0;for(Object e:world.loadedEntityList)if(e instanceof net.minecraft.entity.item.EntityItem)count++;ClientHooks.bridge().diagnostics.put("itemEntityCount",count);}
+ void testsetup(MinecraftServer server){WorldServer world=server.worldServerForDimension(0);for(int z=-12;z<=12;z++)for(int x=-12;x<=12;x++){world.setBlock(x,63,z,Blocks.grass,0,2);for(int y=64;y<=72;y++)world.setBlock(x,y,z,Blocks.air,0,2);}world.setBlock(0,64,3,Blocks.planks,0,2);world.setBlock(1,64,3,Blocks.stone,0,2);world.setBlock(-1,64,3,Blocks.chest,2,2);TileEntityChest chest=(TileEntityChest)world.getTileEntity(-1,64,3);ItemStack diamond=new ItemStack(Items.diamond,7);diamond.setStackDisplayName("Epoch NBT sentinel");chest.setInventorySlotContents(0,diamond);EntityPlayerMP p=(EntityPlayerMP)server.getConfigurationManager().playerEntityList.get(0);p.playerNetServerHandler.setPlayerLocation(0.5,64,-3.5,0,10);p.setGameType(net.minecraft.world.WorldSettings.GameType.CREATIVE);p.inventory.setInventorySlotContents(0,new ItemStack(Epoch.KEY));world.setWorldTime(6000);world.getGameRules().setOrCreateGameRule("doDaylightCycle","false");world.getGameRules().setOrCreateGameRule("randomTickSpeed","0");}
+}
+
+
+
+
+
+

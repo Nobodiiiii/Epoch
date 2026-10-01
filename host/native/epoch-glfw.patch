@@ -1,0 +1,103 @@
+diff --git a/src/win32_window.c b/src/win32_window.c
+index 80e0332..80c6d1f 100644
+--- a/src/win32_window.c
++++ b/src/win32_window.c
+@@ -37,6 +37,19 @@
+ #include <shellapi.h>
+ #include <wchar.h>
+ 
++// Epoch: owned targets must not create a second visible top-level or steal
++// focus while loading. The coordinator enables this only in child processes;
++// after SetParent plus WS_CHILD, normal showing/focus works again.
++static GLFWbool epochAwaitingParent(_GLFWwindow* window)
++{
++    WCHAR enabled[2];
++    if (GetEnvironmentVariableW(L"EPOCH_HIDDEN_START", enabled, 2) != 1 ||
++        enabled[0] != L'1')
++        return GLFW_FALSE;
++    return !(GetWindowLongW(window->win32.handle, GWL_STYLE) & WS_CHILD) ||
++           !GetParent(window->win32.handle);
++}
++
+ // Converts utf16 units to Unicode code points (UTF32).
+ // Returns GLFW_TRUE when the converting completes and the result is assigned to
+ // the argument `codepoint`.
+@@ -2193,11 +2206,15 @@ void _glfwGetWindowContentScaleWin32(_GLFWwindow* window, float* xscale, float*
+ 
+ void _glfwIconifyWindowWin32(_GLFWwindow* window)
+ {
++    if (epochAwaitingParent(window))
++        return;
+     ShowWindow(window->win32.handle, SW_MINIMIZE);
+ }
+ 
+ void _glfwRestoreWindowWin32(_GLFWwindow* window)
+ {
++    if (epochAwaitingParent(window))
++        return;
+     ShowWindow(window->win32.handle, SW_RESTORE);
+ }
+ 
+@@ -2213,6 +2230,9 @@ void _glfwShowWindowWin32(_GLFWwindow* window)
+ {
+     int showCommand = SW_SHOWNA;
+ 
++    if (epochAwaitingParent(window))
++        return;
++
+     if (window->win32.showDefault)
+     {
+         // NOTE: GLFW windows currently do not seem to match the Windows 10 definition of
+@@ -2237,11 +2257,15 @@ void _glfwHideWindowWin32(_GLFWwindow* window)
+ 
+ void _glfwRequestWindowAttentionWin32(_GLFWwindow* window)
+ {
++    if (epochAwaitingParent(window))
++        return;
+     FlashWindow(window->win32.handle, TRUE);
+ }
+ 
+ void _glfwFocusWindowWin32(_GLFWwindow* window)
+ {
++    if (epochAwaitingParent(window))
++        return;
+     BringWindowToTop(window->win32.handle);
+     SetForegroundWindow(window->win32.handle);
+     SetFocus(window->win32.handle);
+@@ -2298,6 +2322,9 @@ void _glfwSetWindowMonitorWin32(_GLFWwindow* window,
+         MONITORINFO mi = { sizeof(mi) };
+         UINT flags = SWP_SHOWWINDOW | SWP_NOACTIVATE | SWP_NOCOPYBITS;
+ 
++        if (epochAwaitingParent(window))
++            flags &= ~SWP_SHOWWINDOW;
++
+         if (window->decorated)
+         {
+             DWORD style = GetWindowLongW(window->win32.handle, GWL_STYLE);
+@@ -2366,7 +2393,8 @@ void _glfwSetWindowMonitorWin32(_GLFWwindow* window,
+ 
+ GLFWbool _glfwWindowFocusedWin32(_GLFWwindow* window)
+ {
+-    return window->win32.handle == GetActiveWindow();
++    // Epoch: keyboard focus belongs to the embedded child, not the host.
++    return window->win32.handle == GetFocus();
+ }
+ 
+ GLFWbool _glfwWindowIconifiedWin32(_GLFWwindow* window)
+@@ -2547,10 +2575,14 @@ void _glfwPollEventsWin32(void)
+     //       Other Win hotkeys are handled implicitly by _glfwInputWindowFocus
+     //       because they change the input focus
+     // NOTE: The other half of this is in the WM_*KEY* handler in windowProc
+-    handle = GetActiveWindow();
++    // Epoch: cross-process parenting joins input queues. The public GLFW
++    // property may contain a foreign process pointer; resolve our own list.
++    handle = GetFocus();
+     if (handle)
+     {
+-        window = GetPropW(handle, L"GLFW");
++        window = _glfw.windowListHead;
++        while (window && window->win32.handle != handle)
++            window = window->next;
+         if (window)
+         {
+             int i;
