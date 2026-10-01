@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "rules": [
+    {
+      "id": "example:dry_maple_leaves",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.16.5"
+      ],
+      "blocks": [
+        "example:maple_leaves"
+      ],
+      "targetMods": {
+        "example": [
+          "1.3.0"
+        ]
+      },
+      "missingTargetProperties": [
+        "waterlogged"
+      ],
+      "drop": {
+        "waterlogged": "false"
+      }
+    },
+    {
+      "id": "example:lamp_to_old",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.16.5"
+      ],
+      "blocks": [
+        "example:lamp"
+      ],
+      "targetMods": {
+        "example": [
+          "1.3.0"
+        ]
+      },
+      "rename": {
+        "powered": "lit"
+      },
+      "values": {
+        "lit": {
+          "off": "false",
+          "on": "true"
+        }
+      }
+    },
+    {
+      "id": "example:lamp_to_new",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.20.1"
+      ],
+      "blocks": [
+        "example:lamp"
+      ],
+      "targetMods": {
+        "example": [
+          "2.0.0"
+        ]
+      },
+      "rename": {
+        "lit": "powered"
+      },
+      "values": {
+        "powered": {
+          "false": "off",
+          "true": "on"
+        }
+      }
+    }
+  ]
+}

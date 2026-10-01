@@ -395,6 +395,15 @@ public class Epoch {
           testsetup(server);
           bridge().status(cmd.id, "READY", "Lab prepared");
           break;
+        case "registry":
+          NativeStates.catalog(NativeStates.mods()).write(Paths.get(cmd.path));
+          bridge().status(cmd.id, "REGISTRY_EXPORTED", "Registry catalog written");
+          break;
+        case "auditstates":
+          RegistryCatalog.writeJson(Paths.get(cmd.path + ".audit-" + VERSION + ".json"),
+              NativeStates.context().audit(RegistryCatalog.read(Paths.get(cmd.path))));
+          bridge().status(cmd.id, "STATES_AUDITED", "State audit written");
+          break;
         case "probe":
           probe(server);
           bridge().status(cmd.id, "PROBED", "Probe available in diagnostics");
@@ -499,24 +508,6 @@ public class Epoch {
     return s;
   }
 
-  @SuppressWarnings({"rawtypes", "unchecked"})
-  BlockState decode(String text) throws Exception {
-    CompoundTag tag = TagParser.parseTag(text);
-    if (tag.contains("EpochLegacyVersion")) return null;
-    ResourceLocation id = new ResourceLocation(tag.getString("Name"));
-    if (!BuiltInRegistries.BLOCK.containsKey(id)) return null;
-    BlockState state = BuiltInRegistries.BLOCK.get(id).defaultBlockState();
-    CompoundTag properties = tag.getCompound("Properties");
-    for (String key : properties.getAllKeys()) {
-      Property prop = state.getBlock().getStateDefinition().getProperty(key);
-      if (prop == null) return null;
-      Optional value = prop.getValue(properties.getString(key));
-      if (value.isEmpty()) return null;
-      state = state.setValue(prop, (Comparable) value.get());
-    }
-    return state;
-  }
-
   void importWorld(MinecraftServer server, Snapshot s) throws Exception {
     s.validate();
     if (s.schema != 1
@@ -528,8 +519,12 @@ public class Epoch {
         || s.sizeY != 256) throw new IllegalArgumentException("Unsupported snapshot bounds/schema");
     ServerPlayer p = player(server);
     ServerLevel level = server.overworld();
+    NativeStates.Context stateContext = NativeStates.context();
+    bridge().diagnostics.put("compatibilityRules", stateContext.rules.description());
     BlockState[] palette = new BlockState[s.palette.size()];
-    for (int n = 0; n < palette.length; n++) palette[n] = decode(s.palette.get(n));
+    BlockStateCompatibility.Report stateReport = new BlockStateCompatibility.Report(s.version, Epoch.VERSION);
+    for (int n = 0; n < palette.length; n++) palette[n] = stateContext.decode(s.palette.get(n), stateReport, n);
+    bridge().diagnostics.put("blockStateCompatibility", stateReport.snapshot());
     Map<Integer, CompoundTag> parsedPayloads = new HashMap<>();
     for (Map.Entry<String, String> entry : s.blockEntities.entrySet())
       parsedPayloads.put(Integer.parseInt(entry.getKey()), TagParser.parseTag(entry.getValue()));
@@ -539,6 +534,7 @@ public class Epoch {
       throw new IllegalArgumentException("Inventory must be an NBT list");
     validateInventory((ListTag) inventoryTag);
     Map<Integer, BlockEntity> preparedEntities = new HashMap<>();
+    PayloadDiagnostics payloadReport = new PayloadDiagnostics();
     Set<Integer> incompatibleEntities = new HashSet<>();
     int plannedIndex = 0;
     for (int r = 0; r < s.runs.length; r += 2) {
@@ -568,10 +564,12 @@ public class Epoch {
           preparedEntities.put(plannedIndex, fresh);
         } catch (Exception incompatible) {
           incompatibleEntities.add(plannedIndex);
+          payloadReport.reject(plannedIndex, s.palette.get(s.runs[r]), incompatible);
         }
       }
     }
     requestClientHold(new double[] {s.x, s.y, s.z, s.yaw, s.pitch});
+    bridge().diagnostics.put("blockEntityCompatibility", payloadReport.snapshot());
     int index = 0, unknowns = 0;
     for (int r = 0; r < s.runs.length; r += 2) {
       int id = s.runs[r];

@@ -8,6 +8,6 @@ public final class LegacyTestLauncher {
   net.minecraft.launchwrapper.Launch.classLoader=loader;
   net.minecraft.launchwrapper.Launch.blackboard=new java.util.HashMap<String,Object>();
   Thread.currentThread().setContextClassLoader(loader);
-  Class.forName("dev.epoch.LegacySelfTest",true,loader).getMethod("main",String[].class).invoke(null,(Object)args);
+  Class.forName(System.getProperty("epoch.testMain", "dev.epoch.LegacySelfTest"),true,loader).getMethod("main",String[].class).invoke(null,(Object)args);
  }
 }

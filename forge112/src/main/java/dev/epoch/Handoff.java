@@ -46,7 +46,9 @@ public final class Handoff {
    case "usekey":ClientHooks.bridge().status(cmd.id,"KEY_TRIGGERED","Invoking actual Epoch Key item use on client");ClientHooks.useKey(cmd.id);break;
    case "testsetup":testsetup(server);ClientHooks.bridge().status(cmd.id,"READY","Lab prepared");break;
    case "testedit":server.getWorld(0).destroyBlock(new BlockPos(0,64,3),false);server.getWorld(0).setBlockState(new BlockPos(1,64,3),Blocks.DIRT.getDefaultState(),2|16);sendChunks(server.getWorld(0),player(server));probe(server);ClientHooks.bridge().status(cmd.id,frozen?"FROZEN":"READY","Deleted placeholder and replaced stone with dirt");break;
-   case "probe":probe(server);ClientHooks.bridge().status(cmd.id,"PROBED","Probe available in diagnostics");break;
+   case "registry":LegacyRegistry.catalog(LegacyRegistry.mods()).write(Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"REGISTRY_EXPORTED","Registry catalog written");break;
+  case "auditstates":RegistryCatalog.writeJson(Paths.get(cmd.path+".audit-"+Epoch.VERSION+".json"),LegacyRegistry.audit(RegistryCatalog.read(Paths.get(cmd.path)),LegacyRegistry.mods()));ClientHooks.bridge().status(cmd.id,"STATES_AUDITED","State audit written");break;
+  case "probe":probe(server);ClientHooks.bridge().status(cmd.id,"PROBED","Probe available in diagnostics");break;
    case "shutdown":frozen=false;Minecraft.getMinecraft().addScheduledTask(()->Minecraft.getMinecraft().shutdown());break;
    default:throw new IllegalArgumentException("Unknown action "+cmd.action);
   }
@@ -65,14 +67,14 @@ public final class Handoff {
   EntityPlayerMP p=player(server);WorldServer world=server.getWorld(0);IBlockState[] palette=new IBlockState[s.palette.size()];for(int n=0;n<palette.length;n++)palette[n]=LegacyStates.decode(s.palette.get(n));
   Map<Integer,NBTTagCompound> parsed=new HashMap<Integer,NBTTagCompound>();for(Map.Entry<String,String> entry:s.blockEntities.entrySet())parsed.put(Integer.parseInt(entry.getKey()),Snbt.compound(entry.getValue()));
   NBTTagCompound inventoryTag=Snbt.compound("{Inventory:"+(s.inventory==null||s.inventory.isEmpty()?"[]":s.inventory)+"}");if(inventoryTag.getTag("Inventory").getId()!=9)throw new IllegalArgumentException("Inventory must be a list");NBTTagList inventory=LegacyItems.decodePlayerInventory((NBTTagList)inventoryTag.getTag("Inventory"));
-  Map<Integer,TileEntity> prepared=new HashMap<Integer,TileEntity>();Set<Integer> incompatible=new HashSet<Integer>();int planned=0;
+  Map<Integer,TileEntity> prepared=new HashMap<Integer,TileEntity>();PayloadDiagnostics payloadReport=new PayloadDiagnostics();Set<Integer> incompatible=new HashSet<Integer>();int planned=0;
   for(int r=0;r<s.runs.length;r+=2){IBlockState state=palette[s.runs[r]];for(int k=0;k<s.runs[r+1];k++,planned++){NBTTagCompound payload=parsed.get(planned);if(payload==null||state==null)continue;try{
    if(!state.getBlock().hasTileEntity(state))throw new IllegalArgumentException("Block cannot hold NBT");TileEntity fresh=state.getBlock().createTileEntity(world,state);ResourceLocation type=fresh==null?null:TileEntity.getKey(fresh.getClass());if(type==null||!type.toString().equals(payload.getString("id")))throw new IllegalArgumentException("Incompatible block entity type");
    // Older containers cannot represent items introduced after this version.
    
    NBTTagCompound copy=payload.copy();BlockPos pos=position(planned);copy.setInteger("x",pos.getX());copy.setInteger("y",pos.getY());copy.setInteger("z",pos.getZ());fresh.readFromNBT(LegacyItems.decodePayload(copy));if(!preserves(copy,LegacyItems.encodePayload(fresh.writeToNBT(new NBTTagCompound()))))throw new IllegalArgumentException("Block entity NBT would lose data");prepared.put(planned,fresh);
-  }catch(Exception bad){incompatible.add(planned);}}}
-  ClientHooks.freezeAt(s.x,s.y,s.z,s.yaw,s.pitch);int index=0,unknowns=0;
+  }catch(Exception bad){incompatible.add(planned);payloadReport.reject(planned,s.palette.get(s.runs[r]),bad);}}}
+  ClientHooks.freezeAt(s.x,s.y,s.z,s.yaw,s.pitch);ClientHooks.bridge().diagnostics.put("blockEntityCompatibility",payloadReport.snapshot());int index=0,unknowns=0;
   for(int r=0;r<s.runs.length;r+=2){int id=s.runs[r];for(int k=0;k<s.runs[r+1];k++,index++){BlockPos pos=position(index);IBlockState state=palette[id];boolean unknown=state==null||incompatible.contains(index);IBlockState placed=unknown?Epoch.UNKNOWN.getDefaultState():state;String payload=s.blockEntities.get(Integer.toString(index));
    if(world.getBlockState(pos)!=placed){TileEntity previous=world.getTileEntity(pos);if(previous instanceof IInventory)((IInventory)previous).clear();world.setBlockState(pos,placed,2|16);}
    TileEntity be=null;if(placed.getBlock().hasTileEntity(placed)){be=prepared.get(index);if(unknown||be==null)be=placed.getBlock().createTileEntity(world,placed);if(be==null)throw new IllegalStateException("Tile factory failed at "+pos);world.removeTileEntity(pos);world.setTileEntity(pos,be);}

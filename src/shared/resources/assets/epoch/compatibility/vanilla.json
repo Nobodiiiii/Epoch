@@ -1,0 +1,173 @@
+{
+  "schema": 1,
+  "rules": [
+    {
+      "id": "epoch:dry_leaves_before_waterlogging",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.16.5",
+        "1.18.2"
+      ],
+      "blocks": [
+        "minecraft:oak_leaves",
+        "minecraft:spruce_leaves",
+        "minecraft:birch_leaves",
+        "minecraft:jungle_leaves",
+        "minecraft:acacia_leaves",
+        "minecraft:dark_oak_leaves"
+      ],
+      "missingTargetProperties": [
+        "waterlogged"
+      ],
+      "drop": {
+        "waterlogged": "false"
+      }
+    },
+    {
+      "id": "epoch:dirt_path_to_grass_path",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.16.5"
+      ],
+      "blocks": [
+        "minecraft:dirt_path"
+      ],
+      "toBlock": "minecraft:grass_path"
+    },
+    {
+      "id": "epoch:grass_path_to_dirt_path",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.18.2",
+        "1.20.1"
+      ],
+      "blocks": [
+        "minecraft:grass_path"
+      ],
+      "toBlock": "minecraft:dirt_path"
+    },
+    {
+      "id": "epoch:dry_rails_before_waterlogging",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.16.5"
+      ],
+      "blocks": [
+        "minecraft:rail",
+        "minecraft:powered_rail",
+        "minecraft:detector_rail",
+        "minecraft:activator_rail"
+      ],
+      "missingTargetProperties": [
+        "waterlogged"
+      ],
+      "drop": {
+        "waterlogged": "false"
+      }
+    },
+    {
+      "id": "epoch:empty_cauldron_after_split",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.18.2",
+        "1.20.1"
+      ],
+      "blocks": [
+        "minecraft:cauldron"
+      ],
+      "missingTargetProperties": [
+        "level"
+      ],
+      "drop": {
+        "level": "0"
+      }
+    },
+    {
+      "id": "epoch:filled_cauldron_after_split_1",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.18.2",
+        "1.20.1"
+      ],
+      "blocks": [
+        "minecraft:cauldron"
+      ],
+      "when": {
+        "level": "1"
+      },
+      "toBlock": "minecraft:water_cauldron"
+    },
+    {
+      "id": "epoch:water_cauldron_before_split_1",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.16.5"
+      ],
+      "blocks": [
+        "minecraft:water_cauldron"
+      ],
+      "when": {
+        "level": "1"
+      },
+      "toBlock": "minecraft:cauldron"
+    },
+    {
+      "id": "epoch:filled_cauldron_after_split_2",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.18.2",
+        "1.20.1"
+      ],
+      "blocks": [
+        "minecraft:cauldron"
+      ],
+      "when": {
+        "level": "2"
+      },
+      "toBlock": "minecraft:water_cauldron"
+    },
+    {
+      "id": "epoch:water_cauldron_before_split_2",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.16.5"
+      ],
+      "blocks": [
+        "minecraft:water_cauldron"
+      ],
+      "when": {
+        "level": "2"
+      },
+      "toBlock": "minecraft:cauldron"
+    },
+    {
+      "id": "epoch:filled_cauldron_after_split_3",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.18.2",
+        "1.20.1"
+      ],
+      "blocks": [
+        "minecraft:cauldron"
+      ],
+      "when": {
+        "level": "3"
+      },
+      "toBlock": "minecraft:water_cauldron"
+    },
+    {
+      "id": "epoch:water_cauldron_before_split_3",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.16.5"
+      ],
+      "blocks": [
+        "minecraft:water_cauldron"
+      ],
+      "when": {
+        "level": "3"
+      },
+      "toBlock": "minecraft:cauldron"
+    }
+  ]
+}

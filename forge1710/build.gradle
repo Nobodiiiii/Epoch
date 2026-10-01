@@ -17,3 +17,14 @@ tasks.register('testLegacy', JavaExec) {
  javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
 }
 tasks.named('check') { dependsOn 'testLegacy' }
+
+tasks.register('registryAudit', JavaExec) {
+ dependsOn 'testClasses'
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'dev.epoch.LegacyTestLauncher'
+ javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+ workingDir = layout.buildDirectory
+ systemProperty 'epoch.testMain', 'dev.epoch.RegistryAudit'
+ args rootProject.file('../build/compatibility').absolutePath
+ if (project.hasProperty('auditAll')) args 'all'
+}

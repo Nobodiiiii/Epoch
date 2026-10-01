@@ -8,6 +8,7 @@ import net.minecraft.nbt.*;
 public final class LegacyProtocolSmoke {
  public static void main(String[] args)throws Exception{
   Bootstrap.register();
+  require(LegacyStates.encode(Blocks.SKULL.getDefaultState()).contains("EpochLegacyVersion"),"Skull sentinel must retain raw legacy state");
   require(LegacyStates.encode(Blocks.PLANKS.getStateFromMeta(5)).contains("dark_oak_planks"),"legacy planks metadata");
   require(LegacyStates.decode("{Name:\"minecraft:chest\",Properties:{facing:\"north\",type:\"single\",waterlogged:\"false\"}}")!=null,"chest default properties");
   require(LegacyStates.decode("{Name:\"minecraft:cherry_planks\"}")==null,"unknown block sentinel");

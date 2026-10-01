@@ -9,6 +9,7 @@ public final class LegacySelfTest {
  public static void main(String[] args)throws Exception{
   cpw.mods.fml.common.Loader.injectData("7","99","40","1614","1.7.10","9.05",new java.io.File("."),java.util.Collections.emptyList());
   Bootstrap.func_151354_b();
+  check(LegacyStates.encode(Blocks.skull,1).contains("EpochLegacyVersion"),"Skull sentinel must retain raw legacy state");
   String source="{text:\"a \\\"quote\\\" and \\\\ slash\",small:7b,short:32s,big:1234567890123L,float:1.5f,double:2.5d,items:[{id:\"minecraft:diamond\",Count:7b}],bytes:[B;1B,-2B],ints:[I;4,-9]}";
   LegacyNbt.Tag parsed=LegacyNbt.parse(source);String canonical=LegacyNbt.encode(parsed);NBTTagCompound nativeTag=LegacyNbt.nativeTag(parsed);check(LegacyNbt.preserves(parsed,LegacyNbt.from(nativeTag))&&LegacyNbt.preserves(LegacyNbt.from(nativeTag),parsed),"Canonical SNBT/binary roundtrip changed types or payload");
   boolean rejected=false;try{LegacyNbt.parse("{x:[L;1L]}");}catch(java.io.IOException expected){rejected=true;}check(rejected,"Long array silently narrowed");

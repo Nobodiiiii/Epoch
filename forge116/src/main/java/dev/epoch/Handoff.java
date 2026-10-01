@@ -43,6 +43,8 @@ private boolean frozen,announced;
   case "usekey":ClientHooks.bridge().status(cmd.id,"KEY_TRIGGERED","Invoking actual Epoch Key item use on client");ClientHooks.useKey(cmd.id);break;
   case "testedit":testedit(server);ClientHooks.bridge().status(cmd.id,frozen?"FROZEN":"READY","Deleted placeholder (0,64,3) without drop; stone (1,64,3) replaced with dirt");break;
   case "testsetup":testsetup(server);ClientHooks.bridge().status(cmd.id,"READY","Lab prepared");break;
+  case "registry":NativeStates.catalog(NativeStates.mods()).write(Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"REGISTRY_EXPORTED","Registry catalog written");break;
+  case "auditstates":RegistryCatalog.writeJson(Paths.get(cmd.path+".audit-"+Epoch.VERSION+".json"),NativeStates.context().audit(RegistryCatalog.read(Paths.get(cmd.path))));ClientHooks.bridge().status(cmd.id,"STATES_AUDITED","State audit written");break;
   case "probe":probe(server);ClientHooks.bridge().status(cmd.id,"PROBED","Probe available in diagnostics");break;
   case "shutdown":frozen=false;Minecraft.getInstance().execute(()->Minecraft.getInstance().stop());break;
   default:throw new IllegalArgumentException("Unknown action "+cmd.action);
@@ -56,13 +58,13 @@ private boolean frozen,announced;
    if(beNbt!=null)s.blockEntities.put(Integer.toString(index),beNbt);Integer id=ids.get(snbt);if(id==null){id=s.palette.size();ids.put(snbt,id);s.palette.add(snbt);}if(id==previous)count++;else {if(count>0){runs.add(previous);runs.add(count);}previous=id;count=1;}
   }if(count>0){runs.add(previous);runs.add(count);}s.runs=runs.stream().mapToInt(Integer::intValue).toArray();return s;
  }
- @SuppressWarnings({"rawtypes","unchecked"}) BlockState decode(String text)throws Exception{CompoundNBT tag=JsonToNBT.parseTag(text);if(tag.contains("EpochLegacyVersion"))return null;ResourceLocation id=new ResourceLocation(tag.getString("Name"));if(!ForgeRegistries.BLOCKS.containsKey(id))return null;BlockState state=ForgeRegistries.BLOCKS.getValue(id).defaultBlockState();CompoundNBT properties=tag.getCompound("Properties");for(String key:properties.getAllKeys()){Property prop=state.getBlock().getStateDefinition().getProperty(key);if(prop==null)return null;Optional value=prop.getValue(properties.getString(key));if(!value.isPresent())return null;state=state.setValue(prop,(Comparable)value.get());}return state;}
- void importWorld(MinecraftServer server,Snapshot s)throws Exception{if(s.schema!=1||s.x0!=-32||s.z0!=-32||s.y0!=0||s.sizeX!=64||s.sizeZ!=64||s.sizeY!=256)throw new IllegalArgumentException("Unsupported snapshot bounds/schema");ServerPlayerEntity p=player(server);ServerWorld level=server.overworld();BlockState[] palette=new BlockState[s.palette.size()];for(int n=0;n<palette.length;n++)palette[n]=decode(s.palette.get(n));Map<Integer,CompoundNBT> parsedNbt=new HashMap<>();
+  void importWorld(MinecraftServer server,Snapshot s)throws Exception{if(s.schema!=1||s.x0!=-32||s.z0!=-32||s.y0!=0||s.sizeX!=64||s.sizeZ!=64||s.sizeY!=256)throw new IllegalArgumentException("Unsupported snapshot bounds/schema");ServerPlayerEntity p=player(server);ServerWorld level=server.overworld();NativeStates.Context stateContext = NativeStates.context();ClientHooks.bridge().diagnostics.put("compatibilityRules",stateContext.rules.description());BlockState[] palette=new BlockState[s.palette.size()];BlockStateCompatibility.Report stateReport = new BlockStateCompatibility.Report(s.version, Epoch.VERSION);for(int n=0;n<palette.length;n++)palette[n]=stateContext.decode(s.palette.get(n), stateReport, n);ClientHooks.bridge().diagnostics.put("blockStateCompatibility", stateReport.snapshot());Map<Integer,CompoundNBT> parsedNbt=new HashMap<>();
   for(Map.Entry<String,String> entry:s.blockEntities.entrySet())parsedNbt.put(Integer.parseInt(entry.getKey()),JsonToNBT.parseTag(entry.getValue()));
   ListNBT inventory=new ListNBT();
   if(s.inventory!=null&&!s.inventory.isEmpty()){INBT parsedInventory=new JsonToNBT(new com.mojang.brigadier.StringReader(s.inventory)).readValue();if(!(parsedInventory instanceof ListNBT))throw new IllegalArgumentException("Inventory must be an NBT list");inventory=(ListNBT)parsedInventory;}
   validateInventory(inventory);
   Map<Integer,TileEntity> preparedEntities=new HashMap<>();
+  PayloadDiagnostics payloadReport = new PayloadDiagnostics();
   Set<Integer> incompatibleEntities=new HashSet<>();
   int plannedIndex=0;
   for(int r=0;r<s.runs.length;r+=2){
@@ -76,11 +78,11 @@ private boolean frozen,announced;
      TileEntity fresh=state.createTileEntity(level);
      if(fresh==null||!ForgeRegistries.TILE_ENTITIES.getKey(fresh.getType()).toString().equals(payload.getString("id")))throw new IllegalArgumentException("Incompatible block entity type");
      CompoundNBT copy=payload.copy();copy.putInt("x",pos.getX());copy.putInt("y",pos.getY());copy.putInt("z",pos.getZ());fresh.load(state,copy.copy());if(!preservesNbt(copy,fresh.save(new CompoundNBT())))throw new IllegalArgumentException("Block entity would lose NBT");preparedEntities.put(plannedIndex,fresh);
-    }catch(Exception incompatible){incompatibleEntities.add(plannedIndex);}
+    }catch(Exception incompatible){incompatibleEntities.add(plannedIndex);payloadReport.reject(plannedIndex,s.palette.get(s.runs[r]),incompatible);}
    }
   }
   ClientHooks.freezeAt(s.x,s.y,s.z,s.yaw,s.pitch);
-  int index=0,unknowns=0;for(int r=0;r<s.runs.length;r+=2){int id=s.runs[r];if(id<0||id>=palette.length||s.runs[r+1]<1)throw new IllegalArgumentException("Invalid runs");for(int k=0;k<s.runs[r+1];k++,index++){if(index>=64*64*256)throw new IllegalArgumentException("Snapshot overflow");BlockPos pos=new BlockPos(index%64-32,index/(64*64),(index/64)%64-32);String payload=s.blockEntities.get(Integer.toString(index));BlockState state=palette[id];boolean unknown=state==null||incompatibleEntities.contains(index);BlockState placed=unknown?Epoch.UNKNOWN.get().defaultBlockState():state;if(level.getBlockState(pos)!=placed){
+  ClientHooks.bridge().diagnostics.put("blockEntityCompatibility",payloadReport.snapshot());int index=0,unknowns=0;for(int r=0;r<s.runs.length;r+=2){int id=s.runs[r];if(id<0||id>=palette.length||s.runs[r+1]<1)throw new IllegalArgumentException("Invalid runs");for(int k=0;k<s.runs[r+1];k++,index++){if(index>=64*64*256)throw new IllegalArgumentException("Snapshot overflow");BlockPos pos=new BlockPos(index%64-32,index/(64*64),(index/64)%64-32);String payload=s.blockEntities.get(Integer.toString(index));BlockState state=palette[id];boolean unknown=state==null||incompatibleEntities.contains(index);BlockState placed=unknown?Epoch.UNKNOWN.get().defaultBlockState():state;if(level.getBlockState(pos)!=placed){
    // Replacement invokes the old block's onRemove, which otherwise spills stale contents.
    TileEntity previous=level.getBlockEntity(pos);
    if(previous instanceof net.minecraft.inventory.IClearable)((net.minecraft.inventory.IClearable)previous).clearContent();

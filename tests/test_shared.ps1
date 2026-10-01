@@ -14,3 +14,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Shared tests failed' }
 if ($LASTEXITCODE -ne 0) { throw 'AutoRuntime session and heartbeat tests failed' }
 & (Join-Path $JavaHome 'bin\java.exe') -cp "$outputDir;$gsonJar" InventorySlotsTest
 if ($LASTEXITCODE -ne 0) { throw 'Player inventory slot tests failed' }
+& (Join-Path $JavaHome 'bin\javac.exe') --release 8 -encoding UTF-8 -cp $gsonJar -d $outputDir (Join-Path $sharedDir 'BlockStateCompatibility.java') (Join-Path $sharedDir 'CanonicalBlockState.java') (Join-Path $sharedDir 'CompatibilityRules.java') (Join-Path $sharedDir 'BlockCompatibilityProvider.java') (Join-Path $PSScriptRoot 'BlockStateCompatibilityTest.java') (Join-Path $PSScriptRoot 'CompatibilityRulesTest.java')
+if ($LASTEXITCODE -ne 0) { throw 'Block state compatibility tests did not compile' }
+& (Join-Path $JavaHome 'bin\java.exe') -cp "$outputDir;$gsonJar;$(Join-Path $epochRoot 'src/shared/resources')" BlockStateCompatibilityTest
+if ($LASTEXITCODE -ne 0) { throw 'Block state compatibility tests failed' }
+
+& (Join-Path $JavaHome 'bin/java.exe') -cp "$outputDir;$gsonJar;$(Join-Path $epochRoot 'src/shared/resources')" CompatibilityRulesTest
+if ($LASTEXITCODE -ne 0) { throw 'Compatibility rule pack tests failed' }

@@ -12,3 +12,16 @@ tasks.named('jar', Jar).configure { finalizedBy 'reobfJar' }
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 
 repositories { maven { url = uri('../.minecraft/libraries'); metadataSources { artifact() } } }
+
+sourceSets.main.resources.srcDir '../src/shared/resources'
+
+tasks.register('registryAudit', JavaExec) {
+ dependsOn 'testClasses'
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'dev.epoch.RegistryAudit'
+ javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+ workingDir = layout.buildDirectory
+ systemProperty 'epoch.projectRoot', projectDir.parentFile.absolutePath
+ args rootProject.file('../build/compatibility').absolutePath
+ if (project.hasProperty('auditAll')) args 'all'
+}
