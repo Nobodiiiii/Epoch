@@ -16,6 +16,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Legacy agent packaging failed' }
 & $Gcc -std=c11 -O2 -Wall -Wextra -shared '-static-libgcc' "-I$JavaHome/include" "-I$JavaHome/include/win32" (Join-Path $PSScriptRoot 'epoch-legacy-window.c') -o (Join-Path $PSScriptRoot 'epoch-legacy-window.dll') -luser32
 if ($LASTEXITCODE -ne 0) { throw 'Legacy window guard compilation failed' }
 if (-not $Smoke) { return }
+$mouseTest = Join-Path $buildPath 'LegacyMouseTest.exe'
+& $Gcc -std=c11 -O2 -Wall -Wextra '-static-libgcc' "-I$JavaHome/include" "-I$JavaHome/include/win32" (Join-Path $PSScriptRoot 'LegacyMouseTest.c') -o $mouseTest -luser32
+if ($LASTEXITCODE -ne 0) { throw 'Legacy mouse regression compilation failed' }
+& $mouseTest
+if ($LASTEXITCODE -ne 0) { throw 'Legacy mouse regression failed' }
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $lwjglRoot = Join-Path $projectRoot '.minecraft/libraries/org/lwjgl/lwjgl'
 Add-Type -AssemblyName System.IO.Compression.FileSystem

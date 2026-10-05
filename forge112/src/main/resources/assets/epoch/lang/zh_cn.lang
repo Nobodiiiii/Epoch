@@ -1,2 +1,3 @@
 item.epoch.phase_key.name=纪元之钥
 tile.epoch.unknown_block.name=未知方块
+item.epoch.unavailable_item.name=封存物品（切回兼容版本恢复）

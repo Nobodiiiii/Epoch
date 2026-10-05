@@ -22,7 +22,24 @@ public final class AutoRuntime {
     private static volatile List<Instance> cached=Collections.emptyList();
     private AutoRuntime(){}
 
+    public static void prepareSavedWorlds(Path binding) throws IOException {
+        if (Boolean.getBoolean("epoch.testHarness")) return;
+        Path root = findProject(binding);
+        Process process = new ProcessBuilder(System.getProperty("epoch.python", "python"),
+                root.resolve("scripts/prepare_saved_worlds.py").toString(), binding.toString())
+                .directory(root.toFile()).redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.appendTo(root.resolve(".minecraft/epoch/saved-worlds.log").toFile())).start();
+        try {
+            if (!process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS) || process.exitValue() != 0)
+                throw new IOException("Saved world committed, but profile links could not be prepared; see saved-worlds.log");
+        } catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
+    }
+
     public static boolean managed(){return Boolean.getBoolean("epoch.managed");}
+    /** Normal single-player launches stream by default; managed targets negotiate with their source. */
+    public static boolean streamingEnabled(){
+        return Boolean.parseBoolean(System.getProperty("epoch.streaming", managed()?"false":"true"));
+    }
     private static String activeSession(){return managed()?System.getProperty("epoch.sessionId", ""):sessionId;}
     private static boolean sameSession(JsonObject object){
         String expected=activeSession();
@@ -66,6 +83,7 @@ public final class AutoRuntime {
         return control;
     }
     public static synchronized void tick(Path gameDir,String version,long hwnd,String worldName,String username,String uuid){
+        if(Boolean.getBoolean("epoch.testHarness"))return;
         controlDirectory(gameDir,version);
         if(project==null||managed()||attempted||hwnd==0||worldName==null||worldName.isEmpty())return;
         attempted=true;

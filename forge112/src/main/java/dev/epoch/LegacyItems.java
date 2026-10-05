@@ -36,7 +36,7 @@ final class LegacyItems {
    if(!(slot<36||(slot>=100&&slot<=103)||slot==150))throw new IllegalArgumentException("1.12.2 cannot represent player inventory slot "+slot);
    if(!occupied.add(slot))throw new IllegalArgumentException("Duplicate player inventory slot "+slot);
   }
-  return decodeList(source);
+  try{return ItemTransfer.decodeList(source);}catch(RuntimeException error){throw error;}catch(Exception error){throw new IllegalArgumentException("Invalid carried item",error);}
  }
  static NBTTagCompound decode(NBTTagCompound source){initialize();String name=source.getString("id");NBTTagCompound prototype=REVERSE.get(name);if(prototype==null)throw new IllegalArgumentException("1.12.2 cannot represent inventory item "+name+"; store it outside the shared region first");NBTTagCompound local=source.copy();local.setString("id",prototype.getString("id"));local.setShort("Damage",prototype.getShort("Damage"));Item item=Item.REGISTRY.getObject(new ResourceLocation(local.getString("id")));
   if(local.hasKey("tag",10)){NBTTagCompound tag=decodePayload(local.getCompoundTag("tag"));if(item.isDamageable()&&tag.hasKey("Damage",99)){int damage=tag.getInteger("Damage");if(damage<0||damage>32767)throw new IllegalArgumentException("Unrepresentable tool damage");local.setShort("Damage",(short)damage);tag.removeTag("Damage");}if(tag.getKeySet().isEmpty())local.removeTag("tag");else local.setTag("tag",tag);}

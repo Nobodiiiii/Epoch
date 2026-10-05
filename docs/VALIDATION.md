@@ -1,5 +1,78 @@
 # Epoch 0.2 — validation status, 2026-10-01
 
+## Empty source-region load failure, 2026-10-05
+
+The 15:30:41 1.16.5 server crash after returning from 1.20.1 reported
+`Epoch terrain load`, caused by `IOException: Truncated source region header`
+in `NativeRegion.hasFullChunk`. The original source save contained five zero-byte
+region files and no nonempty file shorter than the 8192-byte header. Vanilla
+1.20.1 opens region files with `CREATE` even when probing absent chunks; an empty
+file is a normal state before its first chunk write. Epoch incorrectly rejected
+that state. Original logs and build/test evidence are retained under
+`build/empty-region-freeze-20261005/`.
+
+The shared reader now treats only a zero-byte file as containing no saved source
+terrain. Nonempty partial headers and truncated chunk records still fail closed;
+partial-header diagnostics now identify the path and size. No region files need
+to be removed or rewritten.
+
+The empty-file regression failed on the original code and passes after the fix,
+including subsequent writes to the same file, absent records, full/proto status,
+and rejection of partial headers/data. Shared Java tests, all 56 Python tests and
+offline builds/checks for all five adapters passed. All installed adapter JARs
+match their respective builds by SHA-256.
+
+`scripts/test_native_generation.py --version 1.16.5 --empty-source-regions` passed
+in a real client using an isolated source with 25 empty region files: native
+terrain generated, simulation advanced, all 25 source files stayed empty, and
+the client exited cleanly. Evidence is
+`.minecraft/epoch/evidence/native-generation-4d415f1fe4aa492c811e4d57e0d261c6/`.
+All 36,935 pre-existing files in the user's five linked saves and shared authority
+have unchanged SHA-256 hashes after the isolated test and installation.
+This exercises the failing terrain-load path, not an interactive replay of the
+user's entire five-version route.
+
+## Repeated return to 1.16.5, 2026-10-05
+
+The user's final 1.18.2 -> 1.16.5 return was followed by a persistence failure:
+`Stale chunk revision: 271,47; expected=0, actual=23895`. Original logs and status
+are preserved under `build/repeated-switch-20261005/`. All game processes had exited
+before investigation, so no live thread dump was available for this incident.
+
+The 1.16.5 adapter now refreshes authority even when asynchronous prefetch found no
+chunk, and reconciles terrain plus revision when a delayed FULL chunk registers
+after the handoff's resident scan. Stale-write rejection remains enabled.
+
+Offline 1.16.5 build and environment/item checks passed. Real-client evidence:
+
+- `.minecraft/epoch/evidence/streaming-77dc2766649b42c6afd60575b4e105b5/`: forced
+  missing-prefetch and late-FULL registration cases both restored canonical terrain;
+  existing persistence checks and clean shutdown passed.
+- `.minecraft/epoch/evidence/streaming-handoff-7517d49b5bb443b29ec76e3cd2f4d520/`:
+  three 1.20.1 <-> 1.16.5 round trips (six handoffs), edits outside the handoff area,
+  unknown-block restoration, stale-owner rejection and both clean shutdowns passed.
+  Run with `scripts/test_streaming_handoff.py --target-version 1.16.5 --round-trips 3`.
+
+The installed 1.16.5 JAR matches the built artifact by SHA-256. These checks use
+isolated saves, not the user's original world or the full four-version route.
+
+## 1.20.1 to 1.7.10 placeholder unload stall, 2026-10-05
+
+Two live thread dumps (`build/hang-1710-threads.txt` and `build/hang-1710-threads-2.txt`)
+showed the client in `World.updateEntities` / `ArrayList.removeAll`, while the server
+was serializing `Epoch.UnknownTile` during chunk saving. The last handoff status
+reported 66,751 unknown blocks. Payload-only 1.7.10 tiles now return `canUpdate=false`
+so Forge excludes them from its tick list and its quadratic unload removal scan.
+Terrain capture also bypasses encoding the placeholder envelope when its original
+state and payload are available directly.
+
+The offline 1.7.10 `build` passed, including a regression exercising Forge's actual
+single/bulk registration and unload paths with 66,751 placeholders plus a normal
+ticking tile, NBT reload, and description packet creation. Existing legacy and
+environment/item tests passed (`build/fix-1710-hang-build.log`). This does not yet
+verify a restarted real-client handoff or eliminate the separate cost of saving
+large numbers of placeholder entities.
+
 ## Minecraft directory relocation
 
 The active game root is now `D:\Files\Epoch\.minecraft`. `assets`, `libraries`, `versions` and `launcher_profiles.json` were moved from the project root. Both real HMCL Forge profiles retain their user worlds and have matching Epoch adapters in their own `mods` directories. All 48 user-save files have identical before/after SHA-256 hashes.
@@ -108,3 +181,57 @@ Runtime evidence is saved under `.minecraft/epoch/evidence/`:
 - Current frozen frames: `.minecraft/epoch/control/<version>/frozen.png`.
 
 The authoritative event log is `.minecraft/epoch/host.log`. Earlier failed attempts and their crash reports remain available for diagnosis; they are not evidence that the final patched build is failing.
+
+
+## Carried-item switch regression — 2026-10-04
+
+The local coordinator log and 1.12.2 client log show that the 21:46–21:55 switches from 1.20.1 to 1.18.2, 1.16.5, 1.7.10 and 1.12.2 all rejected `minecraft:shaper_armor_trim_smithing_template`. The target inventory preflight rejected the missing registry entry and the coordinator resumed the source.
+
+The five adapters now carry unavailable inventory and ender-chest items as non-usable `epoch:unavailable_item` envelopes. `ItemTransferTest`, invoked by each adapter's `environmentTest`/`check`, uses each version's real item registry and `ItemStack` save/load implementation to check the template, opaque NBT, repeated transfers, current split counts and moved slots, compatible restoration, empty inventories and invalid/oversized inputs. Container block conversion retains its existing conservative checks.
+
+Validation commands: offline Gradle `build` in all five modules; `tests/test_shared.ps1`; and `python -m unittest discover -s tests -p 'test_*.py'`. Build/test logs and installed-JAR SHA-256 checks are retained locally under `build/item-transfer-fix/`. This regression run uses native headless tests; it does not claim a new interactive window-handoff run.
+
+## 1.7.10 missing terrain regression — 2026-10-05
+
+The authority load hook activated imported chunks without calling vanilla's
+`Chunk.populateChunk`. When an imported chunk completed a native 2x2 neighbourhood,
+the waiting native neighbour stayed unpopulated; `EntityPlayerMP` refuses to send
+chunks until population and lighting finish. The hook now runs vanilla's neighbour
+population after registration, keeps imported terrain marked populated, and cancels
+queued unloads through the provider's already-loaded path.
+
+The client readiness check now requires the surrounding 3x3 chunks to have received
+terrain data before accepting a drained renderer queue. It distinguishes the
+client provider's missing-chunk sentinel from actual all-air terrain (legacy
+`chunkExists` always returns true). Handoff sends S26 bulk packets, because an S21
+full-chunk packet with no sections means unload in this version.
+
+Validation:
+
+- The new real-client native-neighbour regression failed before the fix in
+  `.minecraft/epoch/evidence/streaming-ca6c680d8d6b4da8b64cbbebf892d1d7`, with
+  `Authority load skipped native neighbour population or regenerated imported terrain`.
+- Offline `forge1710` Gradle `build` passes, including native client-provider tests
+  for absent chunks, allocation before packet receipt, all-air receipt, negative
+  coordinates and unload. Four Python streaming harness tests pass.
+- `python scripts/test_streaming_runtime.py --version 1.7.10 --explore` passes in
+  `streaming-b97014785c6c4751a351f064579d3988`: neighbour population preserves the
+  imported marker; 512-block movement unloads the origin and restores its edit on
+  return; the client receives all nine nearby chunks before and after exploration.
+  No sampled server tick lacks the player's resident chunk. The flat test's tick
+  interval P99 is 71.66 ms; this is not a performance guarantee for arbitrary saves.
+- `python scripts/test_streaming_adopted.py --target-version 1.7.10 --native-terrain`
+  passes in `streaming-adopted-dc8054c93089448e9571c350b0329b46`: a real adopted
+  1.20.1 -> 1.7.10 -> 1.20.1 handoff preserves the original window, releases target
+  input, advances at least 40 ticks, receives all nine nearby chunks, and restores
+  emerald/diamond edits and cherry planks on return. The final target frame visibly
+  contains the native mountain terrain; unsupported states remain placeholders.
+  Host and clients shut down normally. Handoffs measured 14.83 s outbound and 2.51 s
+  returning, excluding cold target startup. The native test uses a harness-only
+  flying viewpoint 12 blocks above the surface: the flat fixture's Y=66 was inside
+  a mountain and its collision movement invalidated the earlier test attempt.
+  The 1.20.1 fixture build and its native environment tests also pass.
+
+The user's original 1.7.10 log and status were copied to
+`build/diagnostics/legacy-chunks/reported-latest.log` and `reported-status.json`
+before launching tests. Runtime tests use new isolated saves.

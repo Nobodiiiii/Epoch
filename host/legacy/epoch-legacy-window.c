@@ -11,6 +11,47 @@ static LONG guarded_creations;
 static LONG installed_mask;
 static HWND last_display;
 
+/* Win32 reports the top-level source as foreground after cross-process SetParent.
+ * LWJGL2 compares that handle with its own display before clipping/recentering.
+ * Resolve only our visible, focused child of the actual foreground root so an
+ * inactive target cannot pass LWJGL's display-handle comparison. */
+static int focused_foreground_child(HWND window, HWND foreground) {
+    DWORD process = 0;
+    if (!window || !foreground || !IsWindow(window) || !IsWindowVisible(window)) return 0;
+    GetWindowThreadProcessId(window, &process);
+    return process == GetCurrentProcessId()
+        && (GetWindowLongPtrW(window, GWL_STYLE) & WS_CHILD)
+        && GetParent(window) && GetAncestor(window, GA_ROOT) == foreground;
+}
+
+static HWND WINAPI guarded_GetForegroundWindow(void) {
+    HWND foreground = GetForegroundWindow();
+    HWND focused = GetFocus();
+    return focused_foreground_child(focused, foreground) ? focused : foreground;
+}
+
+/* DefWindowProc forwards WM_SETCURSOR to the source parent first, whose cursor
+ * can replace LWJGL2's blank gameplay cursor. Keep the focused child's own class
+ * cursor in its client area, including the normal arrow when a menu ungrabs it. */
+static int set_child_cursor(HWND window, UINT message, LPARAM parameter) {
+    if (message != WM_SETCURSOR || LOWORD(parameter) != HTCLIENT
+            || GetFocus() != window
+            || !focused_foreground_child(window, GetForegroundWindow())) return 0;
+    HCURSOR cursor = (HCURSOR)GetClassLongPtrW(window, GCLP_HCURSOR);
+    SetCursor(cursor ? cursor : LoadCursorW(NULL, (LPCWSTR)IDC_ARROW));
+    return 1;
+}
+
+static LRESULT WINAPI guarded_DefWindowProcW(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (set_child_cursor(window, message, lparam)) return TRUE;
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+static LRESULT WINAPI guarded_DefWindowProcA(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (set_child_cursor(window, message, lparam)) return TRUE;
+    return DefWindowProcA(window, message, wparam, lparam);
+}
+
 static int waiting_for_parent(HWND window) {
     DWORD process = 0;
     if (!window || !IsWindow(window)) return 0;
@@ -135,7 +176,10 @@ static Hook hooks[] = {
     {"SetActiveWindow", guarded_SetActiveWindow, 128},
     {"BringWindowToTop", guarded_BringWindowToTop, 256},
     {"FlashWindow", guarded_FlashWindow, 512},
-    {"FlashWindowEx", guarded_FlashWindowEx, 1024}
+    {"FlashWindowEx", guarded_FlashWindowEx, 1024},
+    {"GetForegroundWindow", guarded_GetForegroundWindow, 2048},
+    {"DefWindowProcW", guarded_DefWindowProcW, 4096},
+    {"DefWindowProcA", guarded_DefWindowProcA, 8192}
 };
 
 static unsigned patch_lwjgl(HMODULE module) {

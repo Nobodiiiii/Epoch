@@ -1,2 +1,3 @@
 item.epoch.phase_key.name=Epoch Key
 tile.epoch.unknown_block.name=Unknown Block
+item.epoch.unavailable_item.name=Stored Item (restored in a compatible version)

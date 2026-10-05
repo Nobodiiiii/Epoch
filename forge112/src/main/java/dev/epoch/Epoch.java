@@ -23,6 +23,7 @@ import net.minecraft.client.renderer.block.model.ModelResourceLocation;
 public final class Epoch {
  public static final String VERSION="1.12.2";
  public static final UnknownBlock UNKNOWN=(UnknownBlock)new UnknownBlock().setRegistryName("epoch","unknown_block").setTranslationKey("epoch.unknown_block");
+ public static final Item UNAVAILABLE_ITEM=new Item().setRegistryName("epoch","unavailable_item").setTranslationKey("epoch.unavailable_item");
  public static final Item KEY=new Item(){
   private long last,count;
   public ActionResult<ItemStack> onItemRightClick(World world,EntityPlayer player,EnumHand hand){
@@ -30,11 +31,27 @@ public final class Epoch {
    return new ActionResult<ItemStack>(EnumActionResult.SUCCESS,player.getHeldItem(hand));
   }
  }.setRegistryName("epoch","phase_key").setTranslationKey("epoch.phase_key").setMaxStackSize(1).setCreativeTab(CreativeTabs.TOOLS);
- @Mod.EventHandler public void preInit(FMLPreInitializationEvent event){MinecraftForge.EVENT_BUS.register(this);MinecraftForge.EVENT_BUS.register(new Handoff());MinecraftForge.EVENT_BUS.register(new ClientHooks());GameRegistry.registerTileEntity(UnknownTile.class,new ResourceLocation("epoch","unknown_block"));}
+ @Mod.EventHandler public void preInit(FMLPreInitializationEvent event){DestinationLoader.register(this);MinecraftForge.EVENT_BUS.register(this);MinecraftForge.EVENT_BUS.register(new Handoff());MinecraftForge.EVENT_BUS.register(new StreamingWorld());MinecraftForge.EVENT_BUS.register(new ClientHooks());GameRegistry.registerTileEntity(UnknownTile.class,new ResourceLocation("epoch","unknown_block"));}
  @SubscribeEvent public void blocks(RegistryEvent.Register<Block> event){event.getRegistry().register(UNKNOWN);}
- @SubscribeEvent public void items(RegistryEvent.Register<Item> event){event.getRegistry().register(KEY);event.getRegistry().register(new ItemBlock(UNKNOWN).setRegistryName(UNKNOWN.getRegistryName()));}
- @SubscribeEvent public void models(net.minecraftforge.client.event.ModelRegistryEvent event){ModelLoader.setCustomModelResourceLocation(KEY,0,new ModelResourceLocation("epoch:phase_key","inventory"));ModelLoader.setCustomModelResourceLocation(Item.getItemFromBlock(UNKNOWN),0,new ModelResourceLocation("epoch:unknown_block","inventory"));}
- @Mod.EventHandler public void init(FMLInitializationEvent event){net.minecraftforge.client.ClientCommandHandler.instance.registerCommand(new net.minecraft.command.CommandBase(){public String getName(){return "epoch";}public String getUsage(net.minecraft.command.ICommandSender sender){return "/epoch versions";}public int getRequiredPermissionLevel(){return 0;}public void execute(net.minecraft.server.MinecraftServer server,net.minecraft.command.ICommandSender sender,String[] args){ClientHooks.request();}});}
+ @SubscribeEvent public void items(RegistryEvent.Register<Item> event){event.getRegistry().register(KEY);event.getRegistry().register(UNAVAILABLE_ITEM);event.getRegistry().register(new ItemBlock(UNKNOWN).setRegistryName(UNKNOWN.getRegistryName()));}
+ @SubscribeEvent public void models(net.minecraftforge.client.event.ModelRegistryEvent event){ModelLoader.setCustomModelResourceLocation(UNAVAILABLE_ITEM,0,new ModelResourceLocation("epoch:unavailable_item","inventory"));ModelLoader.setCustomModelResourceLocation(KEY,0,new ModelResourceLocation("epoch:phase_key","inventory"));ModelLoader.setCustomModelResourceLocation(Item.getItemFromBlock(UNKNOWN),0,new ModelResourceLocation("epoch:unknown_block","inventory"));}
+ @Mod.EventHandler public void starting(FMLServerStartingEvent event){event.registerServerCommand(new net.minecraft.command.CommandBase(){
+  public String getName(){return "epoch";}
+  public String getUsage(net.minecraft.command.ICommandSender sender){return "/epoch versions | travel x y z | travel cancel";}
+  public int getRequiredPermissionLevel(){return 0;}
+  public void execute(net.minecraft.server.MinecraftServer server,net.minecraft.command.ICommandSender sender,String[] args)throws net.minecraft.command.CommandException{
+   if(args.length==0||"versions".equals(args[0])){ClientHooks.request();return;}
+   if(!"travel".equals(args[0])||!sender.canUseCommand(2,"epoch"))throw new net.minecraft.command.CommandException("commands.generic.permission");
+   net.minecraft.entity.player.EntityPlayerMP player=getCommandSenderAsPlayer(sender);
+   if(args.length==2&&"cancel".equals(args[1])){StreamingWorld.cancelTravel(player);return;}
+   if(args.length!=4)throw new net.minecraft.command.WrongUsageException(getUsage(sender));
+   try{StreamingWorld.travel(player,parseDouble(player.posX,args[1],true),parseDouble(player.posY,args[2],false),parseDouble(player.posZ,args[3],true));}
+   catch(Exception error){throw new net.minecraft.command.CommandException(error.getMessage());}
+  }
+ });}
+
+ @Mod.EventHandler public void stopping(FMLServerStoppingEvent event)throws Exception{StreamingWorld.stopping();}
+ @Mod.EventHandler public void stopped(FMLServerStoppedEvent event){StreamingWorld.stopped();}
  public static class UnknownBlock extends Block {
   UnknownBlock(){super(Material.ROCK);setHardness(1.5f);setResistance(6f);setCreativeTab(CreativeTabs.BUILDING_BLOCKS);}
   public boolean hasTileEntity(IBlockState state){return true;}

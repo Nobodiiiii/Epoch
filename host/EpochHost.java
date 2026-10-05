@@ -139,6 +139,16 @@ public class EpochHost {
         String id=UUID.randomUUID().toString();JsonObject j=new JsonObject();j.addProperty("id",id);j.addProperty("action",action);if(path!=null)j.addProperty("path",path.toString());write(control(v).resolve("command.json"),j);log(v+" "+action+" "+id);return id;
     }
     void action(String v,String action,String expected)throws Exception{waitFor(v,command(v,action,null),Set.of(expected),20000);}
+    void validateStreamingPair(String source,String target)throws Exception{
+        JsonObject a=read(control(source).resolve("status.json")),b=read(control(target).resolve("status.json"));
+        JsonObject ad=a.has("diagnostics")?a.getAsJsonObject("diagnostics"):new JsonObject();
+        JsonObject bd=b.has("diagnostics")?b.getAsJsonObject("diagnostics"):new JsonObject();
+        boolean streamA=ad.has("streamingProtocol")&&ad.get("streamingProtocol").getAsInt()==3;
+        boolean streamB=bd.has("streamingProtocol")&&bd.get("streamingProtocol").getAsInt()==3;
+        if(streamA!=streamB)throw new IllegalStateException("Both adapters must support the active streaming authority");
+        if(streamA&&(!ad.has("streamingWorldId")||!bd.has("streamingWorldId")||!ad.get("streamingWorldId").equals(bd.get("streamingWorldId"))))
+            throw new IllegalStateException("Instances are attached to different world authorities");
+    }
     void freezeFrame(String source)throws Exception{
         Path capture=control(source).resolve("frozen.png");
         if(!Files.isRegularFile(capture))throw new IllegalStateException("Source did not publish its frozen framebuffer: "+capture);
@@ -151,6 +161,7 @@ public class EpochHost {
     void switchVersion()throws Exception{
         String source=active,target=source.equals("1.20.1")?"1.16.5":"1.20.1";long start=System.nanoTime();exportMillis=importRenderMillis=revealResumeMillis=0;phase="SWITCHING";error="";status();
         try{
+            validateStreamingPair(source,target);
             Path snapshot=epoch.resolve("session/snapshot.json.gz");Files.createDirectories(snapshot.getParent());
             // Source remains visible while its own render thread captures the
             // framebuffer and freezes the camera. Never capture desktop pixels.
@@ -332,7 +343,7 @@ public class EpochHost {
             if(target.equals(active))return;
             String source=active;boolean frozen=false;pendingTarget=target;phase="PREPARING";error="";status();
             try{
-                prepare(target);phase="SWITCHING";status();long started=System.nanoTime();exportMillis=importRenderMillis=revealResumeMillis=0;
+                prepare(target);validateStreamingPair(source,target);phase="SWITCHING";status();long started=System.nanoTime();exportMillis=importRenderMillis=revealResumeMillis=0;
                 Path snapshot=epoch.resolve("session/snapshot.json.gz");Files.createDirectories(snapshot.getParent());
                 Files.deleteIfExists(control(source).resolve("frozen.png"));frozen=true;
                 waitFor(source,command(source,"export",snapshot),Set.of("EXPORTED"),30000);freezeFrame(source);

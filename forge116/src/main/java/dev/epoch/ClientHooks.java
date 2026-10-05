@@ -94,6 +94,7 @@ public class ClientHooks {
  }
  @SubscribeEvent public static void tick(TickEvent.ClientTickEvent e){
   Minecraft mc=Minecraft.getInstance();lockPose(mc);if(e.phase!=TickEvent.Phase.END)return;
+  dev.epoch.bridge.JourneyMapOrigins.tick(bridge().diagnostics,mc.level!=null&&mc.player!=null);
   if(mc.level!=null&&mc.player!=null&&mc.hasSingleplayerServer()){
    if(mc.getWindow().isFullscreen())mc.getWindow().toggleFullScreen();
    AutoRuntime.tick(mc.gameDirectory.toPath(),Epoch.VERSION,GLFWNativeWin32.glfwGetWin32Window(mc.getWindow().getWindow()),mc.getSingleplayerServer().getWorldPath(net.minecraft.world.storage.FolderName.ROOT).normalize().getFileName().toString(),mc.player.getGameProfile().getName(),mc.player.getGameProfile().getId().toString());

@@ -1,0 +1,114 @@
+[
+  {
+    "game": "1.7.10",
+    "version": "1.7.10-6.0.8+forge",
+    "file": {
+      "id": "z95U9DsE",
+      "hashes": {
+        "sha1": "aa05ce2c4793c99df74f6f4c50e851216070a2d6",
+        "sha512": "2a48b835ae330f7bae5a8db050aa6588522c531b4a2afab112bdf20d78bdceb63117e57763a2000fc8e684ec6aa5a5ee5df8149d25b2bdbda4dcaa3cd06fcb78"
+      },
+      "url": "https://cdn.modrinth.com/data/lfHFW1mp/versions/QACZ3xh8/journeymap-forge-1.7.10-6.0.8.jar",
+      "filename": "journeymap-forge-1.7.10-6.0.8.jar",
+      "primary": true,
+      "size": 5598394,
+      "file_type": null
+    }
+  },
+  {
+    "game": "1.12.2",
+    "version": "1.12.2-6.0.10+forge",
+    "file": {
+      "id": "2uN2z5nJ",
+      "hashes": {
+        "sha1": "6455be4d12b507878067738ccb23cfa02992c719",
+        "sha512": "9f5dbfcd4ec18a6db6ef8d1bf02cafe1d006de71c043bbb12503e2775b45cb682a883a82e88ecbda1fb7f174569f15e566721aafb863a29b6895a17d96a71632"
+      },
+      "url": "https://cdn.modrinth.com/data/lfHFW1mp/versions/ArujzPqc/journeymap-forge-1.12.2-6.0.10.jar",
+      "filename": "journeymap-forge-1.12.2-6.0.10.jar",
+      "primary": true,
+      "size": 6055924,
+      "file_type": null
+    }
+  },
+  {
+    "game": "1.16.5",
+    "version": "1.16.5-6.0.9+forge",
+    "file": {
+      "id": "apROoaGV",
+      "hashes": {
+        "sha512": "c51f849601e9734dc7779ca18bebdc6f199ca6310449430b5f2bd31143930ed03d1281d806c325e3a75a69ca47df5b9460e339321f793889a416363bac5bcaa9",
+        "sha1": "c7f23537a7e1b05d795e75b7445e4a2665324c66"
+      },
+      "url": "https://cdn.modrinth.com/data/lfHFW1mp/versions/v7sAIUDv/journeymap-forge-1.16.5-6.0.9.jar",
+      "filename": "journeymap-forge-1.16.5-6.0.9.jar",
+      "primary": true,
+      "size": 4410076,
+      "file_type": null
+    }
+  },
+  {
+    "game": "1.18.2",
+    "version": "1.18.2-5.9.8-forge",
+    "file": {
+      "id": "vjT8kFqx",
+      "hashes": {
+        "sha512": "e8388f76b709a124894df8a8d8112079485954ca85bca2262e04c5cb4bfce25ef93ee7fcd64f304d05964d818e00c2f33d478f0d4cc5b1a2d390740a22773521",
+        "sha1": "f8daf78b0e16c56aa3038cc6b97926630a13bd32"
+      },
+      "url": "https://cdn.modrinth.com/data/lfHFW1mp/versions/Q3tpDCFf/journeymap-1.18.2-5.9.8-forge.jar",
+      "filename": "journeymap-1.18.2-5.9.8-forge.jar",
+      "primary": true,
+      "size": 7084169,
+      "file_type": null
+    }
+  },
+  {
+    "game": "1.20.1",
+    "version": "1.20.1-6.0.7+forge",
+    "file": {
+      "id": "sIgA3bD8",
+      "hashes": {
+        "sha1": "fb9411d6d516f604a8fa63ba505205d813d7caa1",
+        "sha512": "93f8514bb8bb24f31b67991940a2075ef9889e3eff2e57a6c1bc98828e3315c37d96c025e73318a2209602bfea71a0b3d2fd415bb347076b0c8a1daafae11746"
+      },
+      "url": "https://cdn.modrinth.com/data/lfHFW1mp/versions/HWDC99DO/journeymap-forge-1.20.1-6.0.7.jar",
+      "filename": "journeymap-forge-1.20.1-6.0.7.jar",
+      "primary": true,
+      "size": 4353808,
+      "file_type": null
+    }
+  },
+  {
+    "game": "1.7.10",
+    "version": "1.7.10-0.3.1",
+    "file": {
+      "id": "GcoRZvR6",
+      "hashes": {
+        "sha512": "305a13cdc0ea7bdc724c49ee5d7d32f307d602e8e4d7a3b86dcf66a2fc69e1134eae113c1e9761fe7daec3d81f388886bf63e5d19438ef2e205819433f7e7112",
+        "sha1": "75f9251b1ac4eeacdce0b86a1a68bd8ff4fbf604"
+      },
+      "url": "https://cdn.modrinth.com/data/ghjoiQAl/versions/SeOh2lEZ/%2Bunimixins-all-1.7.10-0.3.1.jar",
+      "filename": "+unimixins-all-1.7.10-0.3.1.jar",
+      "primary": true,
+      "size": 5519796,
+      "file_type": null
+    }
+  },
+  {
+    "game": "1.16.5",
+    "version": "1.0.6-1.16.5",
+    "file": {
+      "id": "oZ12Tq6a",
+      "hashes": {
+        "sha1": "07fb89a148409f877ea427c2065d136ed4959683",
+        "sha512": "91c3b049ff6a0ae579b24273257600e7f80eae2880b517a59078611cc20ee8f7c6f3d9a26fe5206e849809eb4b2abcd03c93d76c78567a60b2e67b3045eee4ae"
+      },
+      "url": "https://cdn.modrinth.com/data/HIuqnQpi/versions/iZCOIvcn/common-networking-forge-1.0.6-1.16.5.jar",
+      "filename": "common-networking-forge-1.0.6-1.16.5.jar",
+      "primary": true,
+      "size": 21178,
+      "file_type": null
+    }
+  }
+]

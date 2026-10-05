@@ -9,6 +9,9 @@ java.toolchain.languageVersion = JavaLanguageVersion.of(8)
 minecraft { mcVersion.set('1.7.10') }
 sourceSets.main.java.srcDir '../src/shared/java'
 sourceSets.main.resources.srcDir '../src/shared/resources'
+tasks.named('jar', Jar).configure {
+ manifest { attributes 'FMLCorePlugin': 'dev.epoch.core.StreamingPlugin', 'FMLCorePluginContainsFMLMod': 'true' }
+}
 tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
 tasks.register('testLegacy', JavaExec) {
  dependsOn 'testClasses'
@@ -28,3 +31,16 @@ tasks.register('registryAudit', JavaExec) {
  args rootProject.file('../build/compatibility').absolutePath
  if (project.hasProperty('auditAll')) args 'all'
 }
+
+tasks.register('environmentTest', JavaExec) {
+ dependsOn 'testClasses'
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'dev.epoch.LegacyTestLauncher'
+ javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+ workingDir = layout.buildDirectory
+ systemProperty 'epoch.testMain', 'dev.epoch.EnvironmentTransferTest'
+}
+tasks.named('check') { dependsOn 'environmentTest' }
+
+// Optional API, downloaded/verified by scripts/install_journeymap.py --download-only.
+dependencies { compileOnly files('../build/journeymap/journeymap-forge-1.7.10-6.0.8.jar') }

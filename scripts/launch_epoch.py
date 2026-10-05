@@ -3,6 +3,7 @@ import argparse, json, os, pathlib, re, subprocess, uuid, zipfile, sys, time, ha
 from contextlib import contextmanager
 from epoch_instances import discover, read_profile, profile_versions, SUPPORTED, install_adapter, atomic_json, load_json, inside
 from prepare_lab import create, force_windowed
+from prepare_transfer import prepare as prepare_transfer
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MINECRAFT = ROOT / '.minecraft'
@@ -19,6 +20,42 @@ def allowed(obj):
         if any(rule.get('features', {}).values()): continue
         result = rule['action'] == 'allow'
     return result
+
+def streaming_binding(seed):
+    control = seed.get('controlDir')
+    if not control:
+        if not seed.get('instanceId'):
+            return None
+        control = ROOT / '.minecraft' / 'epoch' / 'control' / seed['instanceId']
+    control = pathlib.Path(control)
+    try:
+        diagnostics = load_json(control / 'status.json').get('diagnostics', {})
+    except FileNotFoundError:
+        return None
+    if diagnostics.get('streamingProtocol') != 3:
+        return None
+    binding = pathlib.Path(diagnostics['streamingBinding']).resolve()
+    if not inside(binding, seed['gameDir']):
+        raise ValueError('Source authority binding is outside its game directory')
+    value = load_json(binding)
+    if value.get('schema') != 3 or value.get('worldId') != diagnostics.get('streamingWorldId'):
+        raise ValueError('Source authority binding does not match its running world')
+    return binding
+
+def saved_target_world(game, binding_file, fallback):
+    game = pathlib.Path(game).resolve()
+    binding = load_json(binding_file)
+    source = pathlib.Path(binding['sourceWorld']).resolve()
+    if source.parent == game / 'saves':
+        return source.name, True
+    for candidate in (game / 'saves').glob('*/epoch/authority.json'):
+        try:
+            if load_json(candidate).get('worldId') == binding['worldId']:
+                return candidate.parent.parent.name, False
+        except (OSError, ValueError):
+            continue
+    return fallback, False
+
 
 def resolve(version, entry, seed=None, standalone=False, lab=False):
     name = version + '-Forge'
@@ -73,10 +110,25 @@ def resolve(version, entry, seed=None, standalone=False, lab=False):
     legacy=version in ('1.7.10','1.12.2')
     argv=[str((JAVA17 if version in ('1.18.2','1.20.1') else JAVA8)/'javaw.exe'),'-Xms512M','-Xmx3G','-Depoch.projectRoot='+str(ROOT)]
     if seed:
+        binding = streaming_binding(seed)
+        if binding and version not in ('1.7.10', '1.12.2', '1.16.5', '1.18.2', '1.20.1'):
+            raise ValueError('This target adapter has not yet enabled streaming terrain')
         world='Epoch Transfer '+hashlib.sha256((seed['gameDir']+'|'+seed['worldName']).encode()).hexdigest()[:16]
-        create(version,folder=game,world_name=world,username=seed['username'],player_uuid=seed['uuid'])
+        # Never adopt snapshot-only caches as newly generated authority terrain.
+        # Preserve those saves, including any edits made there before streaming was enabled.
+        legacy_save = game / 'saves' / world
+        if binding and (legacy_save / 'level.dat').exists() and not (legacy_save / 'epoch' / 'authority.json').exists():
+            world += ' Stream ' + load_json(binding)['worldId']
+        if binding:
+            world, original = saved_target_world(game, binding, world)
+            if not original:
+                prepare_transfer(version, game, world, seed['username'], seed['uuid'], binding)
+        else:
+            create(version,folder=game,world_name=world,username=seed['username'],player_uuid=seed['uuid'])
         force_windowed(game)
         argv+=['-Depoch.autoStart=true','-Depoch.world='+world,'-Depoch.managed=true','-Depoch.sessionId='+seed['sessionId'],'-Depoch.instanceId='+entry['id'],'-Depoch.controlDir='+str(control)]
+        if binding:
+            argv+=['-Depoch.streaming=true','-Depoch.authorityBinding='+str(binding)]
     elif standalone and lab:
         create(version,folder=game,world_name='Epoch Lab')
         argv+=['-Depoch.autoStart=true','-Depoch.world=Epoch Lab']

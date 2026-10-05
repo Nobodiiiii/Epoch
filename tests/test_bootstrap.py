@@ -33,6 +33,38 @@ class BootstrapTests(unittest.TestCase):
     def write(path, value):
         path.write_text(json.dumps(value), encoding='utf8')
 
+    def streaming_source(self):
+        game = Path(self.seed['gameDir'])
+        binding = game / 'saves' / 'world' / 'epoch' / 'authority.json'
+        binding.parent.mkdir(parents=True)
+        self.write(binding, dict(schema=3, worldId='world-a'))
+        self.seed['controlDir'] = str(self.seed_path.parent)
+        diagnostics = dict(streamingProtocol=3, streamingWorldId='world-a', streamingBinding=str(binding))
+        self.write(self.seed_path.parent / 'status.json', dict(diagnostics=diagnostics))
+        return binding, diagnostics
+
+    def test_streaming_binding_follows_running_world(self):
+        binding, _ = self.streaming_source()
+        self.assertEqual(api.streaming_binding(self.seed), binding.resolve())
+
+    def test_streaming_binding_rejects_different_world(self):
+        binding, _ = self.streaming_source()
+        self.write(binding, dict(schema=3, worldId='world-b'))
+        with self.assertRaisesRegex(ValueError, 'running world'):
+            api.streaming_binding(self.seed)
+
+    def test_streaming_binding_rejects_external_file(self):
+        _, diagnostics = self.streaming_source()
+        external = self.root / 'unrelated.json'
+        self.write(external, dict(schema=3, worldId='world-a'))
+        diagnostics['streamingBinding'] = str(external)
+        self.write(self.seed_path.parent / 'status.json', dict(diagnostics=diagnostics))
+        with self.assertRaisesRegex(ValueError, 'outside'):
+            api.streaming_binding(self.seed)
+
+    def test_legacy_seed_has_no_streaming_binding(self):
+        self.assertIsNone(api.streaming_binding(self.seed))
+
     @contextmanager
     def held_process(self, command):
         process = subprocess.Popen(command, stdin=subprocess.PIPE,

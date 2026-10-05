@@ -44,10 +44,13 @@ public final class ClientHooks {
   Minecraft mc=Minecraft.getMinecraft();if(event.phase==TickEvent.Phase.START){if(listCloseFrames>0)flushMouse(mc);lockPose(mc);return;}
   if(listCloseFrames>0){flushMouse(mc);lockPose(mc);if(--listCloseFrames==0)listClosePose=null;}
   CompletableFuture<double[]> done=capture;if(done!=null){capture=null;try{double[] pose=pose(mc);java.io.File dir=AutoRuntime.controlDirectory(mc.mcDataDir.toPath(),Epoch.VERSION).toFile();net.minecraft.util.ScreenShotHelper.saveScreenshot(dir,"frozen.png",mc.displayWidth,mc.displayHeight,mc.getFramebuffer());java.nio.file.Path generated=dir.toPath().resolve("screenshots/frozen.png");if(java.nio.file.Files.exists(generated))java.nio.file.Files.move(generated,dir.toPath().resolve("frozen.png"),java.nio.file.StandardCopyOption.REPLACE_EXISTING);applyFreeze(pose);done.complete(pose);}catch(Exception e){done.completeExceptionally(e);}}
-  bridge().windowHandle=hwnd();boolean terrainReady=mc.theWorld!=null&&mc.thePlayer!=null&&(mc.currentScreen==null||mc.currentScreen instanceof FreezeScreen)&&++frames>20&&mc.renderGlobal.updateRenderers(mc.thePlayer,false);bridge().clientReady=terrainReady&&terrainReadyLastFrame;terrainReadyLastFrame=terrainReady;
+  int received=mc.theWorld!=null&&mc.thePlayer!=null?ClientTerrain.receivedNearby(mc.theWorld.getChunkProvider(),mc.thePlayer.posX,mc.thePlayer.posZ):0;
+  bridge().diagnostics.put("clientReceivedNearbyChunks",received);
+  bridge().windowHandle=hwnd();boolean terrainReady=received==9&&(mc.currentScreen==null||mc.currentScreen instanceof FreezeScreen)&&++frames>20&&mc.renderGlobal.updateRenderers(mc.thePlayer,false);bridge().clientReady=terrainReady&&terrainReadyLastFrame;terrainReadyLastFrame=terrainReady;
  }
  @SubscribeEvent public void tick(TickEvent.ClientTickEvent event){
   Minecraft mc=Minecraft.getMinecraft();lockPose(mc);if(event.phase!=TickEvent.Phase.END)return;
+  dev.epoch.bridge.JourneyMapOrigins.tick(bridge().diagnostics,mc.theWorld!=null&&mc.thePlayer!=null);
   for(Runnable action;(action=tasks.poll())!=null;)action.run();
   if(mc.isGamePaused()&&bridge().needsWorldTick())mc.displayGuiScreen(null);
   if(mc.theWorld!=null&&mc.thePlayer!=null&&mc.isSingleplayer()){

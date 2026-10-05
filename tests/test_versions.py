@@ -135,6 +135,39 @@ class VersionTests(unittest.TestCase):
                 self.assertEqual(major, instances.SUPPORTED[version])
                 self.assertEqual(result, json.loads((self.minecraft / 'epoch/control' / entry['id'] / 'launch.json').read_text()))
 
+    def test_streaming_targets_inherit_binding_and_unbounded_world(self):
+        seed = dict(gameDir='source', worldName='Source Save', username='FixturePlayer',
+                    uuid='0a34619b-ecaa-4451-b3c1-c7557857423b', sessionId='fixture-session')
+        binding = self.root / 'authority.json'
+        source = self.root / 'source'
+        lab.create('1.20.1', source, world_name='Source Save', terrain='native', seed=-918273645)
+        binding.write_text(json.dumps(dict(schema=3, worldId='world-fixture',
+                                          sourceWorld=str(source / 'saves' / 'Source Save'))))
+        for version in ('1.7.10', '1.12.2', '1.16.5', '1.18.2', '1.20.1'):
+            with self.subTest(version=version):
+                entry = self.fixture(version)
+                with patch.object(launch, 'streaming_binding', return_value=binding), contextlib.redirect_stdout(io.StringIO()):
+                    argv = launch.resolve(version, entry, seed=seed, standalone=True)['argv']
+                self.assertIn('-Depoch.streaming=true', argv)
+                self.assertIn('-Depoch.authorityBinding=' + str(binding), argv)
+                save = next((Path(entry['gameDir']) / 'saves').glob('*/level.dat'))
+                with gzip.open(save, 'rb') as stream:
+                    data = Nbt.read(stream).value['Data'].value
+                self.assertEqual(59999968, data['BorderSize'].value)
+                self.assertEqual(59999968, data['BorderSizeLerpTarget'].value)
+                plain = {key: value.plain() for key, value in data.items()}
+                if version in ('1.7.10', '1.12.2'):
+                    self.assertEqual('default', plain['generatorName'])
+                    self.assertEqual(-918273645, plain['RandomSeed'])
+                else:
+                    settings = plain['WorldGenSettings']
+                    self.assertEqual(-918273645, settings['seed'])
+                    self.assertEqual('minecraft:noise', settings['dimensions']['minecraft:overworld']['generator']['type'])
+                # Preparation can be repeated before the game has ever opened the save.
+                with patch.object(launch, 'streaming_binding', return_value=binding), contextlib.redirect_stdout(io.StringIO()):
+                    again = launch.resolve(version, entry, seed=seed, standalone=True)['argv']
+                self.assertEqual(argv, again)
+
     def test_legacy_profiles_fall_back_to_minecraft_arguments(self):
         for version in ('1.7.10', '1.12.2'):
             with self.subTest(version=version):

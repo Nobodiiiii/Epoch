@@ -21,10 +21,29 @@ public final class Snapshot {
     public long gameTime, dayTime;
     public String inventory = "[]";
     public int selectedSlot;
+    public WorldExtras extras;
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
+    /** Bounds accepted by native terrain adapters; origin is independent of the player. */
+    public void validateColumns() throws IOException {
+        validate();
+        if (y0 != 0 || sizeY != 256 || x0 % 16 != 0 || z0 % 16 != 0 || sizeX % 16 != 0 || sizeZ % 16 != 0
+                || x0 < -30000000 || z0 < -30000000 || (long)x0 + sizeX > 30000000 || (long)z0 + sizeZ > 30000000)
+            throw new IOException("Terrain transfer requires aligned complete columns within world bounds");
+    }
+
+    public int blockX(int index) { return x0 + index % sizeX; }
+    public int blockY(int index) { return y0 + index / (sizeX * sizeZ); }
+    public int blockZ(int index) { return z0 + (index / sizeX) % sizeZ; }
+    public int volume() { return sizeX * sizeY * sizeZ; }
+    public int minChunkX() { return Math.floorDiv(x0, 16); }
+    public int minChunkZ() { return Math.floorDiv(z0, 16); }
+    public int maxChunkX() { return Math.floorDiv(x0 + sizeX - 1, 16); }
+    public int maxChunkZ() { return Math.floorDiv(z0 + sizeZ - 1, 16); }
+
     public void validate() throws IOException {
-        if (schema != 1) throw new IOException("Unsupported snapshot schema " + schema);
+        if (schema != 1 && schema != 2) throw new IOException("Unsupported snapshot schema " + schema);
+        if ((schema == 2) != (extras != null)) throw new IOException("Snapshot extras/schema mismatch");
         if (sizeX < 1 || sizeZ < 1 || sizeY < 1 || sizeX > 128 || sizeZ > 128 || sizeY > 256 || y0 < 0 || y0 + sizeY > 256)
             throw new IOException("Snapshot exceeds shared v0.1 world bounds");
         long total = (long) sizeX * sizeY * sizeZ, count = 0;
@@ -44,6 +63,7 @@ public final class Snapshot {
         if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z) || !Float.isFinite(yaw) || !Float.isFinite(pitch))
             throw new IOException("Non-finite player camera");
         if (selectedSlot < 0 || selectedSlot > 8) throw new IOException("Invalid selected slot");
+        if (extras != null) extras.validate(this);
     }
 
     public static Snapshot read(Path path) throws IOException {

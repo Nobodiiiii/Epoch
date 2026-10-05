@@ -19,7 +19,8 @@ public final class LegacyBindingSmoke {
             GL11.glClear(GL11.GL_COLOR_BUFFER_BIT);
             Display.update();
             long[] before = EpochLegacyAgent.diagnostics();
-            if (before[0] < 31 || before[1] == 0 || before[2] == 0 || before[3] == 0
+            int required = 31 | 2048 | 4096;
+            if ((before[0] & required) != required || before[1] == 0 || before[2] == 0 || before[3] == 0
                     || before[4] != 0 || before[5] != 0 || before[6] != 1)
                 throw new AssertionError("Display escaped startup guard: " + Arrays.toString(before));
             parent = EpochLegacyAgent.adoptForSmoke(before[3]);

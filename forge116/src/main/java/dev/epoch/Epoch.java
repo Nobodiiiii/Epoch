@@ -27,6 +27,7 @@ public class Epoch {
  public static final RegistryObject<Block> UNKNOWN=BLOCKS.register("unknown_block",UnknownBlock::new);
  public static final RegistryObject<TileEntityType<UnknownTile>> UNKNOWN_TILE=TILES.register("unknown_block",()->TileEntityType.Builder.of(UnknownTile::new,UNKNOWN.get()).build(null));
  public static final RegistryObject<Item> UNKNOWN_ITEM=ITEMS.register("unknown_block",()->new BlockItem(UNKNOWN.get(),new Item.Properties().tab(ItemGroup.TAB_MISC)));
+ public static final RegistryObject<Item> UNAVAILABLE_ITEM=ITEMS.register("unavailable_item",()->new Item(new Item.Properties()));
  public static final RegistryObject<Item> KEY=ITEMS.register("phase_key",()->new Item(new Item.Properties().stacksTo(1).tab(ItemGroup.TAB_MISC)) {
   private long last; private long useCount;
   public ActionResult<ItemStack> use(World world,PlayerEntity player,Hand hand) {
@@ -34,7 +35,7 @@ public class Epoch {
    return ActionResult.success(player.getItemInHand(hand));
   }
  });
- public Epoch() { BLOCKS.register(FMLJavaModLoadingContext.get().getModEventBus()); ITEMS.register(FMLJavaModLoadingContext.get().getModEventBus()); TILES.register(FMLJavaModLoadingContext.get().getModEventBus()); MinecraftForge.EVENT_BUS.register(new Handoff()); }
+ public Epoch() { BLOCKS.register(FMLJavaModLoadingContext.get().getModEventBus()); ITEMS.register(FMLJavaModLoadingContext.get().getModEventBus()); TILES.register(FMLJavaModLoadingContext.get().getModEventBus()); MinecraftForge.EVENT_BUS.register(new Handoff()); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::loaded); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::unloaded); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::playerSaved); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopping); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopped); }
  public static class UnknownBlock extends Block {
   public UnknownBlock() { super(AbstractBlock.Properties.of(Material.STONE).strength(1.5f,6f)); }
   public boolean hasTileEntity(BlockState state) { return true; }

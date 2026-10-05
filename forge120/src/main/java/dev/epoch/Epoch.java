@@ -47,6 +47,8 @@ public class Epoch {
           () -> BlockEntityType.Builder.of(UnknownEntity::new, UNKNOWN.get()).build(null));
   public static final RegistryObject<Item> UNKNOWN_ITEM =
       ITEMS.register("unknown_block", () -> new BlockItem(UNKNOWN.get(), new Item.Properties()));
+  public static final RegistryObject<Item> UNAVAILABLE_ITEM =
+      ITEMS.register("unavailable_item", () -> new Item(new Item.Properties()));
   public static final RegistryObject<Item> KEY =
       ITEMS.register(
           "phase_key",
@@ -77,6 +79,7 @@ public class Epoch {
                       player.getItemInHand(hand), level.isClientSide);
                 }
               });
+  static Epoch instance;
   private static BridgeFiles files;
   private boolean frozen, announced, starting;
   private volatile int renderTicks;
@@ -163,6 +166,7 @@ public class Epoch {
   }
 
   public Epoch() {
+    instance = this;
     IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
     BLOCKS.register(bus);
     ITEMS.register(bus);
@@ -172,6 +176,9 @@ public class Epoch {
     MinecraftForge.EVENT_BUS.addListener(this::clientTick);
     MinecraftForge.EVENT_BUS.addListener(this::renderTick);
     MinecraftForge.EVENT_BUS.addListener(this::commands);
+    MinecraftForge.EVENT_BUS.addListener(StreamingWorld::loaded);
+    MinecraftForge.EVENT_BUS.addListener(StreamingWorld::unloaded);
+    MinecraftForge.EVENT_BUS.addListener(StreamingWorld::playerSaved); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopping); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopped);
   }
 
   void creativeTabContents(BuildCreativeModeTabContentsEvent event) {
@@ -187,6 +194,7 @@ public class Epoch {
     }
     if (event.phase != TickEvent.Phase.END) return;
     Minecraft mc = Minecraft.getInstance();
+    dev.epoch.bridge.JourneyMapOrigins.tick(bridge().diagnostics, mc.level != null && mc.player != null);
     bridge().windowHandle = GLFWNativeWin32.glfwGetWin32Window(mc.getWindow().getWindow());
     java.util.concurrent.CompletableFuture<double[]> capture = frameCapture;
     if (capture != null) {
@@ -277,6 +285,18 @@ public class Epoch {
     e.getDispatcher()
         .register(
             net.minecraft.commands.Commands.literal("epoch")
+                .then(net.minecraft.commands.Commands.literal("travel").requires(source -> source.hasPermission(2))
+                    .then(net.minecraft.commands.Commands.literal("cancel").executes(c -> {
+                      StreamingWorld.cancelTravel(c.getSource().getPlayerOrException()); return 1;
+                    }))
+                    .then(net.minecraft.commands.Commands.argument("position", net.minecraft.commands.arguments.coordinates.Vec3Argument.vec3())
+                        .executes(c -> {
+                          try {
+                            net.minecraft.world.phys.Vec3 position=net.minecraft.commands.arguments.coordinates.Vec3Argument.getVec3(c,"position");
+                            StreamingWorld.travel(c.getSource().getPlayerOrException(),position.x,position.y,position.z);
+                            return 1;
+                          } catch(Exception error) { c.getSource().sendFailure(Component.literal(error.getMessage())); return 0; }
+                        })))
                 .then(net.minecraft.commands.Commands.literal("versions").executes(c -> {
                   Minecraft.getInstance().execute(() -> Minecraft.getInstance().setScreen(new VersionListScreen()));
                   return 1;
@@ -302,6 +322,19 @@ public class Epoch {
     MinecraftServer server = e.getServer();
     if (server.isDedicatedServer()) return;
     try {
+      if (!server.getPlayerList().getPlayers().isEmpty()) {
+        Path saved = StreamingWorld.restart(server.overworld());
+        if (saved != null) {
+          frozen = true;
+          StreamingWorld.verifyImport(server.overworld(), saved);
+          importWorld(server, Snapshot.read(saved));
+          StreamingWorld.resume(server.overworld());
+          StreamingWorld.restarted(server.overworld());
+          frozen = false; grabAfter = System.currentTimeMillis() + 400;
+          bridge().diagnostics.put("restartRestored", true);
+        }
+      }
+      if (!frozen) StreamingWorld.tick(server.overworld());
       if (!announced && !server.getPlayerList().getPlayers().isEmpty()) {
         announced = true;
         bridge().status("", "READY", "Integrated world ready; v0.1 region x,z [-32,31], y [0,255]");
@@ -311,6 +344,7 @@ public class Epoch {
       do {
         BridgeFiles.Command cmd = bridge().poll();
         if (cmd != null) handle(server, cmd);
+        StreamingWorld.serviceRequests(server.overworld());
         if (frozen) {
           server.getConnection().tick();
           server.pollTask();
@@ -354,6 +388,7 @@ public class Epoch {
           break;
         case "export":
           frozen = true;
+          StreamingWorld.flush(server.overworld());
           java.util.concurrent.CompletableFuture<double[]> capture =
               new java.util.concurrent.CompletableFuture<>();
           frameCapture = capture;
@@ -365,11 +400,13 @@ public class Epoch {
           snapshot.yaw = (float) camera[3];
           snapshot.pitch = (float) camera[4];
           snapshot.write(Paths.get(cmd.path));
+          StreamingWorld.exported(server.overworld(), Paths.get(cmd.path));
           bridge().status(cmd.id, "EXPORTED", "World snapshot committed; simulation frozen");
           break;
         case "import":
           frozen = true;
           bridge().clientReady = false;
+          StreamingWorld.verifyImport(server.overworld(), Paths.get(cmd.path));
           importWorld(server, Snapshot.read(Paths.get(cmd.path)));
           synchronized (bridge()) {
             renderTicks = 0;
@@ -387,6 +424,7 @@ public class Epoch {
           bridge().status(cmd.id, "FROZEN", "Simulation frozen");
           break;
         case "resume":
+          StreamingWorld.resume(server.overworld());
           frozen = false;
           grabAfter = System.currentTimeMillis() + 400;
           bridge().status(cmd.id, "READY", "Simulation resumed");
@@ -408,6 +446,27 @@ public class Epoch {
           probe(server);
           bridge().status(cmd.id, "PROBED", "Probe available in diagnostics");
           break;
+        case "streamtest":
+          bridge().diagnostics.put("streamingTest", StreamingWorld.selfTest(server.overworld()));
+          bridge().status(cmd.id, "STREAM_TESTED", "Native streaming checks passed in isolated test world");
+          break;
+        case "streamexplore":
+          StreamingWorld.exploreTest(server.overworld());
+          bridge().status(cmd.id, "STREAM_EXPLORING", "Scripted exploration running");
+          break;
+        case "streamposition":
+          bridge().diagnostics.put("streamingPosition", StreamingWorld.positionTest(server.overworld()));
+          bridge().status(cmd.id, "STREAM_POSITION", "Remote player collision verified");
+          break;
+        case "streaminspect":
+        case "streamedit":
+          bridge().diagnostics.put("streamingInspect", StreamingWorld.inspectTest(server.overworld(), "streamedit".equals(cmd.action)));
+          bridge().status(cmd.id, "STREAM_INSPECTED", "Native handoff terrain inspected");
+          break;
+        case "streamrestore":
+          bridge().diagnostics.put("streamingRestore", StreamingWorld.restoreTest(server.overworld()));
+          bridge().status(cmd.id, "STREAM_RESTORED", "Saved remote terrain and player restored after restart");
+          break;
         case "usekey":
           if (frozen) throw new IllegalStateException("Cannot use the key while the client is frozen");
           if (!player(server).getMainHandItem().is(KEY.get()))
@@ -420,6 +479,7 @@ public class Epoch {
           });
           break;
         case "shutdown":
+          StreamingWorld.flush(server.overworld());
           frozen = false;
           Minecraft.getInstance().execute(() -> Minecraft.getInstance().stop());
           break;
@@ -439,20 +499,22 @@ public class Epoch {
     ServerPlayer p = server.getPlayerList().getPlayers().get(0);
     if (p.level().dimension() != Level.OVERWORLD)
       throw new IllegalStateException("Epoch v0.1 supports the Overworld only");
-    if (p.getX() < -32
-        || p.getX() >= 32
-        || p.getZ() < -32
-        || p.getZ() >= 32
+    int horizontalLimit = StreamingWorld.enabled(server.overworld()) ? 30000000 : 32;
+    if (p.getX() < -horizontalLimit
+        || p.getX() >= horizontalLimit
+        || p.getZ() < -horizontalLimit
+        || p.getZ() >= horizontalLimit
         || p.getY() < 0
         || p.getY() >= 256)
       throw new IllegalStateException("Outside Epoch v0.1 shared region [-32,32), y [0,256)");
     return p;
   }
 
-  Snapshot exportWorld(MinecraftServer server) {
-    ServerPlayer p = player(server);
+  Snapshot exportWorld(MinecraftServer server) throws Exception { return exportWorld(server, player(server)); }
+ Snapshot exportWorld(MinecraftServer server, ServerPlayer p) throws Exception {
     ServerLevel level = server.overworld();
     Snapshot s = new Snapshot();
+    StreamingWorld.configureSnapshot(level, s, p.getX(), p.getZ());
     s.version = VERSION;
     s.x = p.getX();
     s.y = p.getY();
@@ -463,6 +525,7 @@ public class Epoch {
     s.dayTime = level.getDayTime();
     s.inventory = p.getInventory().save(new ListTag()).toString();
     s.selectedSlot = p.getInventory().selected;
+    EnvironmentTransfer.capture(server,level,p,s);
     Map<String, Integer> ids = new HashMap<>();
     Map<BlockState, String> encodedStates = new IdentityHashMap<>();
     BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
@@ -509,16 +572,10 @@ public class Epoch {
   }
 
   void importWorld(MinecraftServer server, Snapshot s) throws Exception {
-    s.validate();
-    if (s.schema != 1
-        || s.x0 != -32
-        || s.z0 != -32
-        || s.y0 != 0
-        || s.sizeX != 64
-        || s.sizeZ != 64
-        || s.sizeY != 256) throw new IllegalArgumentException("Unsupported snapshot bounds/schema");
+    s.validateColumns();
     ServerPlayer p = player(server);
     ServerLevel level = server.overworld();
+    EnvironmentTransfer.Prepared environment = EnvironmentTransfer.prepare(server,level,p,s);
     NativeStates.Context stateContext = NativeStates.context();
     bridge().diagnostics.put("compatibilityRules", stateContext.rules.description());
     BlockState[] palette = new BlockState[s.palette.size()];
@@ -532,6 +589,7 @@ public class Epoch {
         new TagParser(new com.mojang.brigadier.StringReader(s.inventory)).readValue();
     if (!(inventoryTag instanceof ListTag))
       throw new IllegalArgumentException("Inventory must be an NBT list");
+    inventoryTag = ItemTransfer.decodeList((ListTag) inventoryTag);
     validateInventory((ListTag) inventoryTag);
     Map<Integer, BlockEntity> preparedEntities = new HashMap<>();
     PayloadDiagnostics payloadReport = new PayloadDiagnostics();
@@ -544,7 +602,7 @@ public class Epoch {
         if (payload == null || state == null) continue;
         BlockPos pos =
             new BlockPos(
-                plannedIndex % 64 - 32, plannedIndex / (64 * 64), (plannedIndex / 64) % 64 - 32);
+                s.blockX(plannedIndex), s.blockY(plannedIndex), s.blockZ(plannedIndex));
         try {
           if (!(state.getBlock() instanceof EntityBlock factory))
             throw new IllegalArgumentException("Block cannot hold NBT");
@@ -576,8 +634,8 @@ public class Epoch {
       if (id < 0 || id >= palette.length || s.runs[r + 1] < 1)
         throw new IllegalArgumentException("Invalid runs");
       for (int k = 0; k < s.runs[r + 1]; k++, index++) {
-        if (index >= 64 * 64 * 256) throw new IllegalArgumentException("Snapshot overflow");
-        BlockPos pos = new BlockPos(index % 64 - 32, index / (64 * 64), (index / 64) % 64 - 32);
+        if (index >= s.volume()) throw new IllegalArgumentException("Snapshot overflow");
+        BlockPos pos = new BlockPos(s.blockX(index), s.blockY(index), s.blockZ(index));
         String payload = s.blockEntities.get(Integer.toString(index));
         BlockState state = palette[id];
         boolean unknown = state == null || incompatibleEntities.contains(index);
@@ -608,7 +666,7 @@ public class Epoch {
         }
       }
     }
-    if (index != 64 * 64 * 256) throw new IllegalArgumentException("Snapshot incomplete");
+    if (index != s.volume()) throw new IllegalArgumentException("Snapshot incomplete");
     server.getWorldData().overworldData().setGameTime(s.gameTime);
     level.setDayTime(s.dayTime);
     p.teleportTo(level, s.x, s.y, s.z, s.yaw, s.pitch);
@@ -622,9 +680,10 @@ public class Epoch {
             s.gameTime,
             s.dayTime,
             level.getGameRules().getBoolean(net.minecraft.world.level.GameRules.RULE_DAYLIGHT)));
+    EnvironmentTransfer.apply(server,level,p,s,environment);
     List<java.util.concurrent.CompletableFuture<?>> lights = new ArrayList<>();
-    for (int cz = -2; cz < 2; cz++)
-      for (int cx = -2; cx < 2; cx++)
+    for (int cz = s.minChunkZ(); cz <= s.maxChunkZ(); cz++)
+      for (int cx = s.minChunkX(); cx <= s.maxChunkX(); cx++)
         lights.add(
             level.getChunkSource().getLightEngine().lightChunk(level.getChunk(cx, cz), true));
     java.util.concurrent.CompletableFuture<?> lighting =
@@ -639,8 +698,8 @@ public class Epoch {
       Thread.sleep(2);
     }
     lighting.join();
-    for (int cz = -2; cz < 2; cz++)
-      for (int cx = -2; cx < 2; cx++)
+    for (int cz = s.minChunkZ(); cz <= s.maxChunkZ(); cz++)
+      for (int cx = s.minChunkX(); cx <= s.maxChunkX(); cx++)
         p.connection.send(
             new net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket(
                 level.getChunk(cx, cz), level.getChunkSource().getLightEngine(), null, null));

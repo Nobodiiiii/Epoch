@@ -1,1 +1,5 @@
-{"item.epoch.phase_key":"纪元之钥","block.epoch.unknown_block":"未知方块"}
+{
+  "item.epoch.phase_key": "纪元之钥",
+  "block.epoch.unknown_block": "未知方块",
+  "item.epoch.unavailable_item": "封存物品（切回兼容版本恢复）"
+}

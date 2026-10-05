@@ -18,11 +18,12 @@ public final class EpochLegacyAgent {
         System.load(new File(nativePath).getCanonicalPath());
         int hooks = install();
         // These functions are imported by both 2.9.1 and 2.9.4. Abort before creating a display
-        // if a different LWJGL binary cannot provide the hidden-start guarantee.
-        if ((hooks & 31) != 31)
+        // if a different LWJGL binary cannot provide hidden startup and child input.
+        int required = 31 | 2048 | 4096;
+        if ((hooks & required) != required)
             throw new IllegalStateException("Incomplete LWJGL2 window hooks: " + hooks);
         System.setProperty("epoch.legacyHiddenInstalled", Integer.toString(hooks));
-        System.err.println("[Epoch] LWJGL2 hidden child startup installed (hooks=" + hooks + ")");
+        System.err.println("[Epoch] LWJGL2 hidden child startup and mouse hooks installed (hooks=" + hooks + ")");
     }
 
     private static native int install();

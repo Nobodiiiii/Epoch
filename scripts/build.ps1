@@ -2,6 +2,8 @@ param([switch]$Offline)
 $ErrorActionPreference = 'Stop'
 $EpochRoot = Split-Path -Parent $PSScriptRoot
 $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17.0.15.6-hotspot'
+python (Join-Path $PSScriptRoot 'install_journeymap.py') --download-only
+if ($LASTEXITCODE -ne 0) { throw 'JourneyMap compile API preparation failed' }
 $EpochGradle = Get-ChildItem -LiteralPath "$env:USERPROFILE\.gradle\wrapper\dists\gradle-8.8-bin" -Recurse -Filter gradle.bat | Select-Object -First 1 -ExpandProperty FullName
 if (-not $EpochGradle) { throw 'Gradle 8.8 is required. Install it or use the module Gradle wrapper.' }
 $EpochArgs = @('build','--no-daemon','--console=plain','--max-workers=4')
