@@ -8,6 +8,8 @@ public final class LegacyTestLauncher {
   net.minecraft.launchwrapper.Launch.classLoader=loader;
   net.minecraft.launchwrapper.Launch.blackboard=new java.util.HashMap<String,Object>();
   Thread.currentThread().setContextClassLoader(loader);
+  if (Boolean.getBoolean("epoch.testEvents")) loader.registerTransformer("cpw.mods.fml.common.asm.transformers.EventSubscriptionTransformer");
+  if (Boolean.getBoolean("epoch.testTransform")) loader.registerTransformer("dev.epoch.core.StreamingTransformer");
   Class.forName(System.getProperty("epoch.testMain", "dev.epoch.LegacySelfTest"),true,loader).getMethod("main",String[].class).invoke(null,(Object)args);
  }
 }

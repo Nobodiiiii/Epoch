@@ -27,14 +27,30 @@ public final class StreamingWorld {
     static final class Projection {
         String worldId;
         long revision;
+        String format, cacheStamp;
         WorldExtras.Carry residual;
     }
     /** Adopt legacy residuals both when decoding saved chunks and when generating new chunks. */
     static Projection initialProjection(String worldId, ChunkKey key, WorldExtras.Carry legacy) throws IOException {
         Projection projection = new Projection(); projection.worldId = worldId;
+        projection.format = ProjectionCache.stamp(Epoch.class);
         if (legacy != null) projection.residual = legacy.chunk(key);
         return projection;
     }
+    private static Projection savedProjection(Context context, Projection live, ChunkKey key) throws IOException {
+        Projection saved = new Projection(); saved.worldId = live.worldId; saved.revision = live.revision;
+        saved.residual = live.residual; saved.format = live.format;
+        saved.cacheStamp = live.cacheStamp;
+        if (context.changed.contains(key) || (context.writes != null && context.writes.isPending(key))) saved.cacheStamp = null;
+        else if (context.writes != null) saved.cacheStamp = live.format;
+        return saved;
+    }
+
+    private static boolean reusable(Context context, Projection projection, long revision) throws IOException {
+        return projection != null && ProjectionCache.reusable(projection.worldId, context.binding.worldId,
+                projection.revision, revision, projection.cacheStamp, ProjectionCache.stamp(Epoch.class));
+    }
+
     private static final class Resident {
         final LevelChunk chunk;
         final Projection projection;
@@ -68,7 +84,7 @@ public final class StreamingWorld {
         ChunkWriteQueue writes;
         volatile Throwable failure;
         boolean applying;
-        long ticks;
+        long ticks, nativeCacheHits, terrainConversions;
         Exploration exploration;
         final DestinationLoader destination;
 
@@ -175,14 +191,7 @@ public final class StreamingWorld {
     }
 
     // Conservative accounting for retained arrays, strings, collection entries and object overhead.
-    static long retainedBytes(ChunkSnapshot snapshot) {
-        long bytes = 1024L + snapshot.runs.length * 4L + snapshot.biomes.runs.length * 4L;
-        for (String state : snapshot.palette) bytes += 128L + state.length() * 2L;
-        for (String biome : snapshot.biomes.palette) bytes += 128L + biome.length() * 2L;
-        for (Map.Entry<String,String> entry : snapshot.blockEntities.entrySet())
-            bytes += 256L + (entry.getKey().length() + entry.getValue().length()) * 2L;
-        return bytes;
-    }
+    static long retainedBytes(ChunkSnapshot snapshot) { return snapshot.retainedBytes(); }
 
     static CompletableFuture<Void> travel(net.minecraft.server.level.ServerPlayer player, double x, double y, double z) throws Exception {
         Context context = context(player.getLevel());
@@ -217,6 +226,39 @@ public final class StreamingWorld {
         }
     }
 
+    private static final String CACHED_LIGHT = "EpochDeferredCachedLight";
+
+    /** Keep native light out of vanilla's queue until the authority revision is rechecked. */
+    static void deferCachedLighting(CompoundTag tag) {
+        CompoundTag saved = new CompoundTag();
+        saved.putBoolean("valid", tag.getBoolean("isLightOn"));
+        net.minecraft.nbt.ListTag lights = new net.minecraft.nbt.ListTag();
+        for (net.minecraft.nbt.Tag value : tag.getList("sections", 10)) {
+            CompoundTag section = (CompoundTag) value, copy = new CompoundTag();
+            copy.putByte("Y", section.getByte("Y"));
+            for (String name : new String[]{"BlockLight", "SkyLight"}) {
+                if (section.contains(name, 7)) copy.put(name, section.get(name));
+                section.remove(name);
+            }
+            lights.add(copy);
+        }
+        saved.put("sections", lights); tag.put(CACHED_LIGHT, saved); tag.putBoolean("isLightOn", false);
+    }
+
+    private static void restoreCachedLighting(ServerLevel level, LevelChunk chunk, CompoundTag saved) {
+        if (!saved.getBoolean("valid")) return;
+        level.getChunkSource().getLightEngine().retainData(chunk.getPos(), true);
+        for (net.minecraft.nbt.Tag value : saved.getList("sections", 10)) {
+            CompoundTag section = (CompoundTag) value;
+            net.minecraft.core.SectionPos pos = net.minecraft.core.SectionPos.of(chunk.getPos(), section.getByte("Y"));
+            if (section.contains("BlockLight", 7)) level.getChunkSource().getLightEngine().queueSectionData(
+                    net.minecraft.world.level.LightLayer.BLOCK, pos, new net.minecraft.world.level.chunk.DataLayer(section.getByteArray("BlockLight")), true);
+            if (section.contains("SkyLight", 7)) level.getChunkSource().getLightEngine().queueSectionData(
+                    net.minecraft.world.level.LightLayer.SKY, pos, new net.minecraft.world.level.chunk.DataLayer(section.getByteArray("SkyLight")), true);
+        }
+        chunk.setLightCorrect(true);
+    }
+
     /** Called only for scheduleChunkLoad, never for the native save path's blocking existence read. */
     public static CompletableFuture<Optional<CompoundTag>> loading(CompletableFuture<Optional<CompoundTag>> nativeRead,
             ServerLevel level, ChunkPos pos) {
@@ -228,6 +270,14 @@ public final class StreamingWorld {
         } catch (Exception error) { context.failure = error; throw new LoadFailure(error); }
         return nativeRead.thenApplyAsync(nativeTag -> {
             try {
+                if (nativeTag.isPresent()) {
+                    String raw = nativeTag.get().getString(PROJECTION);
+                    if (raw.length() > 4 * 1024 * 1024) throw new IOException("Oversized chunk projection");
+                    Projection saved = raw.isEmpty() ? null : JSON.fromJson(raw, Projection.class);
+                    if (reusable(context, saved, context.store.revision(key))) {
+                        deferCachedLighting(nativeTag.get()); return nativeTag;
+                    }
+                }
                 ChunkStore.Versioned canonical = context.store.read(key);
                 if (canonical == null && !context.world.equals(Paths.get(context.binding.sourceWorld)) && context.sourceContains(key)) {
                     ChunkSnapshot source = SourceChunkRequests.fetch(Paths.get(context.binding.authority).resolve("requests"), context.binding.worldId, key, 30000);
@@ -265,6 +315,7 @@ public final class StreamingWorld {
         try {
             LevelChunk chunk = nativeChunk instanceof ImposterProtoChunk wrapper ? wrapper.getWrapped() : null;
             ChunkKey key = new ChunkKey(pos.x, pos.z);
+            CompoundTag cachedLight = tag.getCompound(CACHED_LIGHT); tag.remove(CACHED_LIGHT);
             ChunkStore.Versioned canonical = context.incoming.remove(key);
             if (context.detached.containsKey(key)) {
                 context.flushKey(key); canonical = context.store.read(key);
@@ -276,9 +327,14 @@ public final class StreamingWorld {
                 projection = JSON.fromJson(text, Projection.class);
                 if (projection == null || !context.binding.worldId.equals(projection.worldId) || projection.revision < 0)
                     throw new IOException("Native chunk belongs to a different world");
-                if (canonical == null && projection.revision > 0) throw new IOException("Authority lost a previously committed chunk");
             }
-            ChunkStore.Versioned refreshed = context.store.read(key);
+            if (chunk != null && reusable(context, projection, context.store.revision(key))) {
+                restoreCachedLighting(level, chunk, cachedLight);
+                context.projections.put(chunk, projection); context.nativeCacheHits++;
+                return new ImposterProtoChunk(chunk, false);
+            }
+            long latestRevision = context.store.revision(key);
+            ChunkStore.Versioned refreshed = canonical != null && canonical.revision == latestRevision ? canonical : context.store.read(key);
             if (canonical != null && refreshed == null) throw new IOException("Committed chunk disappeared during loading");
             canonical = refreshed;
             if (canonical != null) {
@@ -288,6 +344,7 @@ public final class StreamingWorld {
                 try { TerrainTransfer.apply(level, chunk, prepared); } finally { context.applying = false; }
                 projection = new Projection(); projection.worldId = context.binding.worldId;
                 projection.revision = canonical.revision; projection.residual = prepared.residual();
+                projection.format = ProjectionCache.stamp(Epoch.class); projection.cacheStamp = projection.format; context.terrainConversions++;
             }
             if (chunk != null) {
                 if (projection == null) projection = initialProjection(context.binding.worldId,
@@ -306,14 +363,17 @@ public final class StreamingWorld {
         try {
             // Native files are caches. Record only acknowledged revision; pending edits stay queued.
             // Reload always resolves authority, and unload retains pending data independently.
-            context.drainChanges(); tag.putString(PROJECTION, JSON.toJson(projection)); return tag;
+            context.drainChanges(); tag.putString(PROJECTION, JSON.toJson(savedProjection(context, projection, new ChunkKey(chunk.getPos().x, chunk.getPos().z)))); return tag;
         } catch (Exception error) { context.failure = error; throw new LoadFailure(error); }
     }
 
     public static void dirty(ChunkAccess access, boolean dirty) {
         if (!dirty || !(access instanceof LevelChunk chunk) || !(chunk.getLevel() instanceof ServerLevel level)) return;
         Context context = WORLDS.get(level);
-        if (context != null && !context.applying && context.writes != null) context.changed.add(new ChunkKey(chunk.getPos().x, chunk.getPos().z));
+        if (context != null && !context.applying) {
+            Projection projection = context.projections.get(chunk); if (projection != null) projection.cacheStamp = null;
+            if (context.writes != null) context.changed.add(new ChunkKey(chunk.getPos().x, chunk.getPos().z));
+        }
     }
 
     /** Vanilla otherwise turns arbitrary chunk-read failures into new empty/generatable chunks. */
@@ -337,12 +397,14 @@ public final class StreamingWorld {
             // A prepared native chunk can become FULL after the handoff's resident scan.
             // Reconcile at registration too: its early decode may predate the source's final commit.
             if (context.writes != null && context.writes.isPending(key)) context.flushKey(key);
-            ChunkStore.Versioned latest = context.store.read(key);
+            long revision = context.store.revision(key);
+            ChunkStore.Versioned latest = revision == projection.revision ? null : context.store.read(key);
             if (latest != null && latest.revision != projection.revision) {
                 TerrainTransfer.Prepared prepared = TerrainTransfer.prepare(level, latest.chunk);
                 context.applying = true;
                 try { TerrainTransfer.apply(level, chunk, prepared); } finally { context.applying = false; }
                 projection.revision = latest.revision; projection.residual = prepared.residual();
+                projection.format = ProjectionCache.stamp(Epoch.class); projection.cacheStamp = projection.format; context.terrainConversions++;
                 level.getChunkSource().getLightEngine().lightChunk(chunk, false);
             }
             context.loaded.put(key, new Resident(chunk, projection));
@@ -398,6 +460,10 @@ public final class StreamingWorld {
         Epoch.bridge().diagnostics.put("streamingWorldId", context.binding.worldId);
         Epoch.bridge().diagnostics.put("streamingBinding", context.world.resolve("epoch/authority.json").toString());
         Epoch.bridge().diagnostics.put("streamingLoaded", context.loaded.size());
+        Epoch.bridge().diagnostics.put("nativeTerrainCacheHits", context.nativeCacheHits);
+        Epoch.bridge().diagnostics.put("terrainConversions", context.terrainConversions);
+        Epoch.bridge().diagnostics.put("authorityCache", context.store.diagnostics());
+        Epoch.bridge().diagnostics.put("terrainTimings", TerrainMetrics.diagnostics());
         Epoch.bridge().diagnostics.put("streamingDirty", context.writes == null ? 0 : context.writes.pendingCount());
         Epoch.bridge().diagnostics.put("streamingDetached", context.detached.size());
         Epoch.bridge().diagnostics.put("streamingDetachedBytes", context.detachedBytes);
@@ -496,13 +562,16 @@ public final class StreamingWorld {
         List<CompletableFuture<?>> lighting = new ArrayList<>();
         for (Resident resident : new ArrayList<>(context.loaded.values())) {
             ChunkKey key = new ChunkKey(resident.chunk.getPos().x, resident.chunk.getPos().z);
+            long latestRevision = context.store.revision(key);
+            if (latestRevision == 0 || latestRevision == resident.projection.revision) continue;
             ChunkStore.Versioned latest = context.store.read(key);
-            if (latest == null || latest.revision == resident.projection.revision) continue;
+            if (latest == null) throw new IOException("Committed terrain disappeared during reconciliation");
             TerrainTransfer.Prepared prepared = TerrainTransfer.prepare(level, latest.chunk);
             context.applying = true;
             try { TerrainTransfer.apply(level, resident.chunk, prepared); } finally { context.applying = false; }
             resident.projection.revision = latest.revision; resident.projection.residual = prepared.residual();
-            lighting.add(level.getChunkSource().getLightEngine().lightChunk(resident.chunk, true));
+            resident.projection.format = ProjectionCache.stamp(Epoch.class); resident.projection.cacheStamp = resident.projection.format; context.terrainConversions++;
+            lighting.add(level.getChunkSource().getLightEngine().lightChunk(resident.chunk, false));
         }
         CompletableFuture<?> lights = CompletableFuture.allOf(lighting.toArray(new CompletableFuture<?>[0]));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);

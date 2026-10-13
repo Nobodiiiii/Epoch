@@ -168,6 +168,23 @@
         "level": "3"
       },
       "toBlock": "minecraft:cauldron"
+    },
+    {
+      "id": "epoch:dry_azalea_before_waterlogging",
+      "safety": "equivalent",
+      "targetVersions": [
+        "1.18.2"
+      ],
+      "blocks": [
+        "minecraft:azalea_leaves",
+        "minecraft:flowering_azalea_leaves"
+      ],
+      "missingTargetProperties": [
+        "waterlogged"
+      ],
+      "drop": {
+        "waterlogged": "false"
+      }
     }
   ]
 }

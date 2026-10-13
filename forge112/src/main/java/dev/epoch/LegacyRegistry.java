@@ -9,7 +9,7 @@ final class LegacyRegistry {
  static RegistryCatalog catalog(Map<String,String> mods)throws Exception{
   RegistryCatalog out=new RegistryCatalog(Epoch.VERSION,mods);Set<String> seen=new HashSet<>();
   for(Block block:Block.REGISTRY)for(IBlockState state:block.getBlockState().getValidStates()){
-   String snbt=LegacyStates.encode(state);if(seen.add(snbt))out.states.add(new RegistryCatalog.State(Snbt.compound(snbt).getString("Name"),snbt,block.hasTileEntity(state)));
+   String snbt=LegacyStates.encodeActual(state);out.states.add(new RegistryCatalog.State(Snbt.compound(snbt).getString("Name"),snbt,block.hasTileEntity(state)).nativeSource(state.toString(),"registered_state_with_metadata_projection_and_supported_derived_fields"));
   }
   out.states.sort(Comparator.comparing((RegistryCatalog.State s)->s.block).thenComparing(s->s.snbt));return out;
  }

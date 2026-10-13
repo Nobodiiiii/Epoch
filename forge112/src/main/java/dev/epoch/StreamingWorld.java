@@ -26,14 +26,30 @@ public final class StreamingWorld {
     static final class Projection {
         String worldId;
         long revision;
+        String format, cacheStamp;
         WorldExtras.Carry residual;
     }
     /** Adopt legacy residuals both when decoding saved chunks and when generating new chunks. */
     static Projection initialProjection(String worldId, ChunkKey key, WorldExtras.Carry legacy) throws IOException {
         Projection projection = new Projection(); projection.worldId = worldId;
+        projection.format = ProjectionCache.stamp(Epoch.class);
         if (legacy != null) projection.residual = legacy.chunk(key);
         return projection;
     }
+    private static Projection savedProjection(Context context, Projection live, ChunkKey key) throws IOException {
+        Projection saved = new Projection(); saved.worldId = live.worldId; saved.revision = live.revision;
+        saved.residual = live.residual; saved.format = live.format;
+        saved.cacheStamp = live.cacheStamp;
+        if (context.changed.contains(key) || (context.writes != null && context.writes.isPending(key))) saved.cacheStamp = null;
+        else if (context.writes != null) saved.cacheStamp = live.format;
+        return saved;
+    }
+
+    private static boolean reusable(Context context, Projection projection, long revision) throws IOException {
+        return projection != null && ProjectionCache.reusable(projection.worldId, context.binding.worldId,
+                projection.revision, revision, projection.cacheStamp, ProjectionCache.stamp(Epoch.class));
+    }
+
     private static final class Resident {
         final Chunk chunk;
         final Projection projection;
@@ -67,7 +83,7 @@ public final class StreamingWorld {
         ChunkWriteQueue writes;
         volatile Throwable failure;
         boolean applying;
-        long ticks;
+        long ticks, nativeCacheHits, terrainConversions;
         final DestinationLoader destination;
         Exploration exploration;
 
@@ -174,14 +190,7 @@ public final class StreamingWorld {
     }
 
     // Conservative accounting for retained arrays, strings, collection entries and object overhead.
-    static long retainedBytes(ChunkSnapshot snapshot) {
-        long bytes = 1024L + snapshot.runs.length * 4L + snapshot.biomes.runs.length * 4L;
-        for (String state : snapshot.palette) bytes += 128L + state.length() * 2L;
-        for (String biome : snapshot.biomes.palette) bytes += 128L + biome.length() * 2L;
-        for (Map.Entry<String,String> entry : snapshot.blockEntities.entrySet())
-            bytes += 256L + (entry.getKey().length() + entry.getValue().length()) * 2L;
-        return bytes;
-    }
+    static long retainedBytes(ChunkSnapshot snapshot) { return snapshot.retainedBytes(); }
 
     static CompletableFuture<Void> travel(net.minecraft.entity.player.EntityPlayerMP player,double x,double y,double z) throws Exception {
         Context context=context(player.getServerWorld());
@@ -229,11 +238,15 @@ public final class StreamingWorld {
         Context context = context(provider.world);
         try {
             if (!provider.world.getMinecraftServer().isCallingFromMinecraftThread()) throw new IOException("Authority load must run on server thread");
-            ChunkStore.Versioned value = canonical(context, new ChunkKey(x, z));
-            if (value == null) return null;
+            ChunkKey key = new ChunkKey(x, z);
+            if (context.detached.containsKey(key)) context.flushKey(key);
+            long revision = context.store.revision(key);
+            ChunkStore.Versioned value = revision == 0 ? canonical(context, key) : null;
+            if (revision == 0 && value == null) return null;
             // Existing native entities are loaded by vanilla; beforeEntities replaces terrain first.
             Chunk chunk = provider.chunkLoader.loadChunk(provider.world, x, z);
             if (chunk == null) {
+                if (value == null) value = canonical(context, key);
                 chunk = new Chunk(provider.world, x, z);
                 applyCanonical(context, chunk, value);
             }
@@ -251,6 +264,7 @@ public final class StreamingWorld {
         try { TerrainTransfer.apply(context.level, chunk, prepared); } finally { context.applying = false; }
         Projection projection = new Projection(); projection.worldId = context.binding.worldId;
         projection.revision = value.revision; projection.residual = prepared.residual();
+        projection.format = ProjectionCache.stamp(Epoch.class); projection.cacheStamp = projection.format; context.terrainConversions++;
         context.projections.put(chunk, projection);
         chunk.setTerrainPopulated(true);
     }
@@ -261,6 +275,14 @@ public final class StreamingWorld {
         Context context = context((WorldServer)world); if (context == null) return;
         try {
             ChunkKey key = new ChunkKey(chunk.x, chunk.z);
+            if (data.hasKey(PROJECTION, 8)) {
+                String raw = data.getString(PROJECTION);
+                if (raw.length() > 4 * 1024 * 1024) throw new IOException("Oversized chunk projection");
+                Projection saved = JSON.fromJson(raw, Projection.class);
+                if (!context.detached.containsKey(key) && reusable(context, saved, context.store.revision(key))) {
+                    context.projections.put(chunk, saved); context.nativeCacheHits++; return;
+                }
+            }
             ChunkStore.Versioned value = canonical(context, key);
             if (value != null) {
                 applyCanonical(context, chunk, value);
@@ -284,7 +306,10 @@ public final class StreamingWorld {
     public static void dirty(Chunk chunk) {
         if (!(chunk.getWorld() instanceof WorldServer)) return;
         Context context = WORLDS.get((WorldServer)chunk.getWorld());
-        if (context != null && !context.applying && context.writes != null) context.changed.add(new ChunkKey(chunk.x, chunk.z));
+        if (context != null && !context.applying) {
+            Projection projection = context.projections.get(chunk); if (projection != null) projection.cacheStamp = null;
+            if (context.writes != null) context.changed.add(new ChunkKey(chunk.x, chunk.z));
+        }
     }
 
     @net.minecraftforge.fml.common.eventhandler.SubscribeEvent
@@ -293,7 +318,7 @@ public final class StreamingWorld {
         Context context = WORLDS.get((WorldServer)event.getWorld()); if (context == null) return;
         try {
             context.drainChanges(); Projection projection = context.projections.get(event.getChunk());
-            if (projection != null) event.getData().getCompoundTag("Level").setString(PROJECTION, JSON.toJson(projection));
+            if (projection != null) event.getData().getCompoundTag("Level").setString(PROJECTION, JSON.toJson(savedProjection(context, projection, new ChunkKey(event.getChunk().x, event.getChunk().z))));
         } catch (Exception error) { context.failure = error; throw new LoadFailure(error); }
     }
 
@@ -363,6 +388,10 @@ public final class StreamingWorld {
         ClientHooks.bridge().diagnostics.put("streamingWorldId", context.binding.worldId);
         ClientHooks.bridge().diagnostics.put("streamingBinding", context.world.resolve("epoch/authority.json").toString());
         ClientHooks.bridge().diagnostics.put("streamingLoaded", context.loaded.size());
+        ClientHooks.bridge().diagnostics.put("nativeTerrainCacheHits", context.nativeCacheHits);
+        ClientHooks.bridge().diagnostics.put("terrainConversions", context.terrainConversions);
+        ClientHooks.bridge().diagnostics.put("authorityCache", context.store.diagnostics());
+        ClientHooks.bridge().diagnostics.put("terrainTimings", TerrainMetrics.diagnostics());
         ClientHooks.bridge().diagnostics.put("streamingDirty", context.writes == null ? 0 : context.writes.pendingCount());
         ClientHooks.bridge().diagnostics.put("streamingTicks", ++context.ticks);
     }
@@ -459,12 +488,15 @@ public final class StreamingWorld {
         if (owner.epoch != expected || !owner.owner.equals(previous)) throw new IOException("Handoff ownership changed; refusing a second writer");
         for (Resident resident : new ArrayList<>(context.loaded.values())) {
             ChunkKey key = new ChunkKey(resident.chunk.x, resident.chunk.z);
+            long latestRevision = context.store.revision(key);
+            if (latestRevision == 0 || latestRevision == resident.projection.revision) continue;
             ChunkStore.Versioned latest = context.store.read(key);
-            if (latest == null || latest.revision == resident.projection.revision) continue;
+            if (latest == null) throw new IOException("Committed terrain disappeared during reconciliation");
             TerrainTransfer.Prepared prepared = TerrainTransfer.prepare(level, latest.chunk);
             context.applying = true;
             try { TerrainTransfer.apply(level, resident.chunk, prepared); } finally { context.applying = false; }
             resident.projection.revision = latest.revision; resident.projection.residual = prepared.residual();
+            resident.projection.format = ProjectionCache.stamp(Epoch.class); resident.projection.cacheStamp = resident.projection.format; context.terrainConversions++;
             resident.chunk.checkLight();
         }
         // Lease publication is the handoff commit point. Everything above remains recoverable by the source.

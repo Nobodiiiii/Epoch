@@ -81,11 +81,12 @@ def discover(root,seed,running=None):
             except Exception as error:errors.append({'id':'invalid-'+hashlib.sha256(str(path).encode()).hexdigest()[:12],'label':folder.name,'version':'未知','forgeVersion':'','gameDir':str(folder),'versionJson':str(path),'supported':False,'reason':str(error),'current':False})
     entries={}
     live={str(Path(p['gameDir']).resolve()).lower():int(p['pid']) for p in running}
-    managed=set()
+    managed=set();managed_processes={}
     try:
         status=load_json(epoch/'host-status.json')
         if status.get('sessionId')==seed['sessionId']:
             managed=set(status.get('children',{}));managed.add(seed['instanceId'])
+            managed_processes=status.get('managedProcesses',{})
     except (OSError,ValueError,KeyError,TypeError,AttributeError):pass
     def add(game_dir,profile,label=None):
         game_dir=Path(game_dir).resolve();path,meta,version,forge=profile
@@ -97,7 +98,7 @@ def discover(root,seed,running=None):
         elif not forge:reason='需要对应版本 Forge，不能在纯净/Fabric 实例中加载'
         elif not re.fullmatch(r'\d+(?:\.\d+)*',forge):reason='Forge 版本格式无效'
         elif int(forge.split('.')[0])!=SUPPORTED[version]:reason='Forge 主版本与适配器不匹配'
-        elif str(game_dir).lower() in live and not is_current and identity not in managed:reason='实例正在独立运行，请先关闭该实例'
+        elif str(game_dir).lower() in live and not is_current and identity not in managed and managed_processes.get(identity)!=live[str(game_dir).lower()]:reason='实例正在独立运行，请先关闭该实例'
         entry=dict(label=label or game_dir.name,id=identity,version=version,forgeVersion=forge,gameDir=str(game_dir),versionJson=str(path),supported=not reason,reason=reason,current=is_current)
         entry['libraryRoot']=str(next((p/'libraries' for p in (path.parent.parent.parent,root/'.minecraft',root) if (p/'libraries').is_dir()),root/'.minecraft'/'libraries'))
         entry['assetsRoot']=str(next((p/'assets' for p in (path.parent.parent.parent,root/'.minecraft',root) if (p/'assets').is_dir()),root/'.minecraft'/'assets'))

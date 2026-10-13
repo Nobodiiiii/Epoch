@@ -47,9 +47,15 @@ final class TerrainTransfer {
     }
 
     static ChunkSnapshot capture(WorldServer level, Chunk chunk, WorldExtras.Carry residual) throws Exception {
+        long started=System.nanoTime();
+        try { return captureMeasured(level, chunk, residual); }
+        finally { TerrainMetrics.record("capture",System.nanoTime()-started); }
+    }
+
+    private static ChunkSnapshot captureMeasured(WorldServer level, Chunk chunk, WorldExtras.Carry residual) throws Exception {
         if (!level.getMinecraftServer().isCallingFromMinecraftThread()) throw new IOException("Terrain capture must run on the server thread");
         ChunkSnapshot out = new ChunkSnapshot(); out.chunkX = chunk.x; out.chunkZ = chunk.z;
-        out.version = Epoch.VERSION;
+        out.version = Epoch.VERSION;out.sourceInstance = dev.epoch.bridge.Appearance.instance();
         Map<IBlockState, String> encoded = new IdentityHashMap<>();
         Map<String, Integer> palette = new HashMap<>(); List<Integer> runs = new ArrayList<>();
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos(); int previous = -1, count = 0;
@@ -72,7 +78,7 @@ final class TerrainTransfer {
             String payload = entity == null ? null : LegacyItems.encodePayload(entity.writeToNBT(new NBTTagCompound())).toString();
             if (entity instanceof Epoch.UnknownTile && !((Epoch.UnknownTile)entity).originalState.isEmpty()) {
                 Epoch.UnknownTile unknown = (Epoch.UnknownTile)entity;
-                canonical = unknown.originalState; payload = unknown.originalNbt.isEmpty() ? null : unknown.originalNbt;
+                canonical = unknown.originalState;out.appearanceSources.put(Integer.toString(index), unknown.sourceInstance); payload = unknown.originalNbt.isEmpty() ? null : unknown.originalNbt;
             }
             if (payload != null) out.blockEntities.put(Integer.toString(index), payload);
             Integer id = palette.get(canonical);
@@ -87,18 +93,30 @@ final class TerrainTransfer {
             for (int y = 0; y < 64; y++) cells[(y * 16 + z) * 16 + x] = biome;
         }
         out.biomes = WorldExtras.Biomes.of(residual == null ? cells : residual.restore(bounds, cells));
-        out.validate(); return out;
+        LegacyContext.capture(out, level); dev.epoch.bridge.Appearance.request(out.palette); out.validate(); return out;
     }
 
     /** Resolve every state and validate all payloads before touching the destination chunk. */
     static Prepared prepare(WorldServer level, ChunkSnapshot source) throws Exception {
-        source.validate(); Snapshot bounds = source.blocks();
+        long started=System.nanoTime();
+        try { return prepareMeasured(level, source); }
+        finally { TerrainMetrics.record("prepare",System.nanoTime()-started); }
+    }
+
+    private static Prepared prepareMeasured(WorldServer level, ChunkSnapshot source) throws Exception {
+        source.validate(); source = BlockPayloads.project(source, Epoch.VERSION); source = BlockContext.repairPending(source); Snapshot bounds = source.blocks();
         IBlockState[] palette = new IBlockState[source.palette.size()];
         for (int n = 0; n < palette.length; n++) palette[n] = LegacyStates.decode(source.palette.get(n));
         IBlockState[] cells = new IBlockState[ChunkSnapshot.VOLUME];
         Map<BlockPos, TileEntity> entities = new HashMap<>(); int index = 0;
+        BitSet payloadPositions = new BitSet(ChunkSnapshot.VOLUME);
+        for (String position : source.blockEntities.keySet()) payloadPositions.set(Integer.parseInt(position));
         for (int r = 0; r < source.runs.length; r += 2) {
             int id = source.runs[r];
+            int end = index + source.runs[r + 1], nextPayload = payloadPositions.nextSetBit(index);
+            if (palette[id] != null && !palette[id].getBlock().hasTileEntity(palette[id]) && (nextPayload < 0 || nextPayload >= end)) {
+                Arrays.fill(cells, index, end, palette[id]); index = end; continue;
+            }
             for (int n = 0; n < source.runs[r + 1]; n++, index++) {
                 BlockPos pos = new BlockPos(bounds.blockX(index), bounds.blockY(index), bounds.blockZ(index));
                 IBlockState state = palette[id]; String raw = source.blockEntities.get(Integer.toString(index));
@@ -121,8 +139,8 @@ final class TerrainTransfer {
                 if (unknown) {
                     state = Epoch.UNKNOWN.getDefaultState();
                     Epoch.UnknownTile placeholder = new Epoch.UnknownTile();
-                    placeholder.originalState = source.palette.get(id); placeholder.originalNbt = raw == null ? "" : raw;
-                    placeholder.sourceVersion = source.version; entity = placeholder;
+                    placeholder.originalState = source.originalState(index); placeholder.originalNbt = source.originalPayload(index);
+                    placeholder.sourceVersion = source.version;placeholder.sourceInstance = source.appearanceSource(index); entity = placeholder;
                 }
                 cells[index] = state;
                 if (entity != null) { entity.setPos(pos); entities.put(pos, entity); }
@@ -168,6 +186,12 @@ final class TerrainTransfer {
 
     /** Apply on the server thread, before the chunk becomes visible or starts ticking. */
     static void apply(WorldServer level, Chunk chunk, Prepared prepared) throws Exception {
+        long started=System.nanoTime();
+        try { applyMeasured(level, chunk, prepared); }
+        finally { TerrainMetrics.record("apply",System.nanoTime()-started); }
+    }
+
+    private static void applyMeasured(WorldServer level, Chunk chunk, Prepared prepared) throws Exception {
         if (!level.getMinecraftServer().isCallingFromMinecraftThread()) throw new IOException("Terrain apply must run on the server thread");
         if (chunk.x != prepared.source.chunkX || chunk.z != prepared.source.chunkZ)
             throw new IOException("Prepared terrain belongs to a different chunk");

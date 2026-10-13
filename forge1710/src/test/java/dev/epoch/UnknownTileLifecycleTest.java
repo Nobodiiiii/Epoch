@@ -30,6 +30,7 @@ final class UnknownTileLifecycleTest {
             tile.originalState = "{Name:\"minecraft:deepslate\"}";
             tile.originalNbt = "{retained:1b}";
             tile.sourceVersion = "1.20.1";
+            tile.sourceInstance = "source-120-resource-pack-a";
             tiles.add(tile);
             world.addTileEntity(tile);
         }
@@ -46,6 +47,12 @@ final class UnknownTileLifecycleTest {
         restored.writeToNBT(roundtrip);
         LegacySelfTest.check(saved.equals(roundtrip), "Non-ticking placeholder lost saved payload");
         LegacySelfTest.check(restored.getDescriptionPacket() != null, "Non-ticking placeholder lost network sync");
+        net.minecraft.item.ItemStack item = new net.minecraft.item.ItemStack(net.minecraft.init.Items.stick);
+        restored.copyToItem(item);
+        Epoch.UnknownTile placed = new Epoch.UnknownTile();
+        placed.readFromItem(item);
+        LegacySelfTest.check(placed.sourceInstance.equals(restored.sourceInstance)
+            && placed.originalState.equals(restored.originalState), "Block item lost source appearance provenance");
         System.out.println("PASS: 66751 placeholder registrations/unloads, NBT reload and description packet");
     }
 }

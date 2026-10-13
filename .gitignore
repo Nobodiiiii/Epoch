@@ -1,3 +1,6 @@
+# Local agent instructions.
+/AGENTS.md
+
 # Local Minecraft instances, saves, dependencies, and launcher state.
 /.minecraft/
 /instances/
@@ -10,6 +13,7 @@
 # runtime libraries are intentionally tracked with their source/build scripts.
 **/.gradle/
 **/build/
+/forge*/bin/
 **/run/
 *.class
 **/build*.txt

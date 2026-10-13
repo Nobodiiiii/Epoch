@@ -53,6 +53,17 @@ class InstanceTests(unittest.TestCase):
         if os.name=='nt':
             self.assertEqual('1-20-1-'+hashlib.sha256(b'd:/files/epoch/.minecraft/instances/1.20.1|1.20.1').hexdigest()[:12], api.instance_id('D:/Files/Epoch/.minecraft/instances/1.20.1','1.20.1'))
 
+    def test_starting_managed_client_stays_available_before_window_attachment(self):
+        self.profile('forge120')
+        target=next(item for item in self.entries() if item['label']=='forge120')
+        running=[dict(gameDir=target['gameDir'],pid=1234)]
+        status=self.root/'.minecraft/epoch/host-status.json'
+        self.write(status,dict(sessionId=self.seed['sessionId'],children={},managedProcesses={target['id']:1234}))
+        self.assertTrue(next(item for item in self.entries(running) if item['id']==target['id'])['supported'])
+        for session,pid in [(self.seed['sessionId'],9999),('other-session',1234)]:
+            self.write(status,dict(sessionId=session,children={},managedProcesses={target['id']:pid}))
+            self.assertFalse(next(item for item in self.entries(running) if item['id']==target['id'])['supported'])
+
     def test_inherited_forge_profile_merges_arguments_and_libraries(self):
         base=self.profile('1.16.5', '1.16.5', '', libraries=[{'name':'example:library:1'}, {'name':'example:keep:1'}], arguments={'game':['--base','yes'],'jvm':['-Dbase=true']})
         child=self.profile('forge116','1.16.5','36.2.42', inheritsFrom='1.16.5', libraries=[{'name':'example:library:2'}])

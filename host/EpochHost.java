@@ -21,6 +21,48 @@ public class EpochHost {
         boolean SetProcessDPIAware();
         boolean AttachThreadInput(int from,int to,boolean attach);
         int GetWindowThreadProcessId(HWND window,com.sun.jna.ptr.IntByReference processId);
+        HWND GetForegroundWindow(); HWND GetAncestor(HWND window,int flags);
+        boolean IsWindow(HWND window); boolean IsWindowVisible(HWND window);
+        boolean IsWindowEnabled(HWND window); boolean IsIconic(HWND window);
+        boolean GetGUIThreadInfo(int thread,WinUser.GUITHREADINFO info);
+        boolean PeekMessage(WinUser.MSG message,HWND window,int min,int max,int remove);
+    }
+    /** Route input only inside the already-foreground game. Never activate a background root. */
+    static final class FocusRouter {
+        static boolean same(HWND a,HWND b){return Objects.equals(a,b);}
+        static int pendingThread(Win api,HWND root,HWND target,long owner,Collection<HWND> surfaces){
+            if(root==null||target==null||!api.IsWindow(root)||!api.IsWindow(target)
+                    ||!same(api.GetForegroundWindow(),root)||api.IsIconic(root)
+                    ||!api.IsWindowVisible(root)||!api.IsWindowVisible(target)
+                    ||!api.IsWindowEnabled(root)||!api.IsWindowEnabled(target)
+                    ||!same(api.GetAncestor(target,WinUser.GA_ROOT),root))return 0;
+            com.sun.jna.ptr.IntByReference pid=new com.sun.jna.ptr.IntByReference();
+            int thread=api.GetWindowThreadProcessId(target,pid);
+            if(thread==0||Integer.toUnsignedLong(pid.getValue())!=owner)return 0;
+            WinUser.GUITHREADINFO info=new WinUser.GUITHREADINFO();
+            // GetFocus on the coordinator thread cannot observe the game's input queue.
+            // Leave native menus, title-bar drags and unrelated controls/dialogs alone.
+            if(!api.GetGUIThreadInfo(thread,info)||!same(info.hwndActive,root)
+                    ||(info.flags&0x1e)!=0||info.hwndMenuOwner!=null||info.hwndMoveSize!=null
+                    ||info.hwndCapture!=null||same(info.hwndFocus,target))return 0;
+            if(info.hwndFocus!=null&&!same(info.hwndFocus,root)&&!surfaces.contains(info.hwndFocus))return 0;
+            return thread;
+        }
+        static boolean restore(Win api,int ours,HWND root,HWND target,long owner,Collection<HWND> surfaces){
+            int thread=pendingThread(api,root,target,owner,surfaces);
+            if(thread==0)return false;
+            // A headless coordinator must have a message queue before attaching input.
+            api.PeekMessage(new WinUser.MSG(),null,0,0,0);
+            boolean linked=ours!=thread;
+            if(linked&&!api.AttachThreadInput(ours,thread,true))return false;
+            try{
+                // Alt-Tab, hide, disable or destruction may race the queue attachment.
+                if(pendingThread(api,root,target,owner,surfaces)!=thread)return false;
+                api.SetFocus(target);
+                WinUser.GUITHREADINFO info=new WinUser.GUITHREADINFO();
+                return api.GetGUIThreadInfo(thread,info)&&same(info.hwndFocus,target);
+            }finally{if(linked)api.AttachThreadInput(ours,thread,false);}
+        }
     }
     final Gson gson=new GsonBuilder().setPrettyPrinting().create();
     final Path root,epoch; final Map<String,Process> processes=new LinkedHashMap<>();
@@ -219,6 +261,71 @@ public class EpochHost {
         SwingUtilities.invokeLater(frame::dispose);
     }
     /** Adopts a user's already running Minecraft HWND. Only owned targets become children. */
+    /** Cooperative jobs: slow helpers/clients run in parallel; window and IPC work stays on the host thread. */
+    static final class Warmups {
+        interface Driver {
+            Process prepare(String id)throws Exception;
+            void launch(String id)throws Exception;
+            boolean alive(String id);
+            JsonObject state(String id)throws Exception;
+            String freeze(String id,JsonObject ready)throws Exception;
+            void abort(String id);
+        }
+        static final class Job {
+            final String id;String phase="PREPARING",error="",commandId;long deadline;Process helper;
+            Job(String id){this.id=id;}
+            boolean pending(){return !phase.equals("READY")&&!phase.equals("FAILED");}
+        }
+        final Driver driver;final Map<String,Job> jobs=new LinkedHashMap<>();
+        Warmups(Driver driver){this.driver=driver;}
+        Job request(String id,long now){
+            Job prior=jobs.get(id);
+            if(prior!=null&&(prior.pending()||prior.phase.equals("READY")&&driver.alive(id)))return prior;
+            Job job=new Job(id);jobs.put(id,job);
+            try{job.helper=driver.prepare(id);job.deadline=now+120000;}catch(Exception e){fail(job,e);}
+            return job;
+        }
+        void fail(Job job,Exception failure){
+            if(job.helper!=null&&job.helper.isAlive())job.helper.destroyForcibly();
+            driver.abort(job.id);job.phase="FAILED";job.error=failure.toString();
+        }
+        void tick(long now){
+            for(Job job:jobs.values())try{
+                if(job.phase.equals("FAILED"))continue;
+                if(job.phase.equals("READY")){
+                    if(!driver.alive(job.id))fail(job,new IllegalStateException("Prewarmed instance exited"));
+                    continue;
+                }
+                if(now>=job.deadline)throw new TimeoutException(job.id+" during "+job.phase);
+                if(job.phase.equals("PREPARING")){
+                    if(job.helper.isAlive())continue;
+                    if(job.helper.exitValue()!=0)throw new IllegalStateException("Target preparation failed; see prepare-"+job.id+".log");
+                    driver.launch(job.id);job.phase="STARTING";job.deadline=now+240000;
+                    continue;
+                }
+                if(!driver.alive(job.id))throw new IllegalStateException(job.id+" exited");
+                JsonObject state=driver.state(job.id);if(state==null)continue;
+                String phase=state.get("phase").getAsString();
+                if(job.phase.equals("STARTING")){
+                    if(phase.equals("ERROR"))throw new IllegalStateException(job.id+": "+state);
+                    if(phase.equals("READY")&&state.has("clientReady")&&state.get("clientReady").getAsBoolean()){
+                        job.commandId=driver.freeze(job.id,state);job.phase="FREEZING";job.deadline=now+20000;
+                    }
+                }else if(state.has("commandId")&&job.commandId.equals(state.get("commandId").getAsString())){
+                    if(phase.equals("ERROR"))throw new IllegalStateException(job.id+": "+state);
+                    if(phase.equals("FROZEN"))job.phase="READY";
+                }
+            }catch(Exception e){fail(job,e);}
+        }
+        JsonObject status(){
+            JsonObject result=new JsonObject();jobs.forEach((id,job)->{
+                JsonObject item=new JsonObject();item.addProperty("phase",job.phase);item.addProperty("error",job.error);result.add(id,item);
+            });return result;
+        }
+        void cancelPending(){
+            for(Job job:jobs.values())if(job.pending())fail(job,new CancellationException("Host closing"));
+        }
+    }
     static final class Adopted extends EpochHost {
         final Path seedPath,sourceControl;
         final JsonObject seed;
@@ -228,9 +335,29 @@ public class EpochHost {
         final Map<String,String> versions=new HashMap<>();
         String pendingTarget="";
         long lastHeartbeat;
+        long focusTransfers;
         int width=-1,height=-1;
         int rootStyle;
         boolean clippingInstalled;
+        boolean acceptingWarmups=true;
+        final Warmups warmups=new Warmups(new Warmups.Driver(){
+            public Process prepare(String id)throws Exception{return startPreparation(id);}
+            public void launch(String id)throws Exception{windows.remove(id);Adopted.this.launch(id);}
+            public boolean alive(String id){return Adopted.this.alive(id);}
+            public JsonObject state(String id)throws Exception{
+                try{return read(control(id).resolve("status.json"));}
+                catch(NoSuchFileException|AccessDeniedException|JsonParseException ignored){return null;}
+            }
+            public String freeze(String id,JsonObject ready)throws Exception{
+                attach(id,new HWND(new Pointer(ready.get("windowHandle").getAsLong())));
+                return command(id,"freeze",null);
+            }
+            public void abort(String id){
+                if(id.equals(sourceId)||id.equals(active))return;
+                Process process=processes.get(id);if(process!=null&&process.isAlive())process.destroyForcibly();
+                windows.remove(id);
+            }
+        });
         Adopted(Path root,Path seedPath)throws Exception{
             super(root,false);this.seedPath=seedPath.toAbsolutePath();seed=read(this.seedPath);
             sourceId=seed.get("instanceId").getAsString();sessionId=seed.get("sessionId").getAsString();
@@ -253,7 +380,11 @@ public class EpochHost {
         @Override boolean alive(String id){return id.equals(sourceId)?sourceProcess.isAlive():super.alive(id);}
         @Override void poll()throws Exception{
             if(!sourceProcess.isAlive())throw new CancellationException("Original Minecraft process closed");
+            if(!closing&&acceptingWarmups){readWarmupRequests();warmups.tick(System.currentTimeMillis());}
             resize();
+            // SetParent retains the original top-level HWND, which Windows can refocus
+            // after Alt-Tab/click/restore. Unlike the Swing host it has no focus listener.
+            if(!closing&&!active.equals(sourceId)&&(phase.equals("READY")||phase.equals("PREPARING")))focus();
             if(System.currentTimeMillis()-lastHeartbeat>=1000){status();lastHeartbeat=System.currentTimeMillis();}
         }
         @Override void status()throws Exception{
@@ -263,8 +394,11 @@ public class EpochHost {
             j.addProperty("hostHwnd",host==null?0:Pointer.nativeValue(host.getPointer()));j.addProperty("targetId",pendingTarget);
             j.addProperty("heartbeat",System.currentTimeMillis());j.addProperty("heartbeatTimestamp",java.time.Instant.now().toString());
             j.addProperty("switchMillis",switchMillis);j.addProperty("error",error);
+            j.addProperty("focusTransfers",focusTransfers);
             JsonObject timings=new JsonObject();timings.addProperty("export",exportMillis);timings.addProperty("importAndRender",importRenderMillis);timings.addProperty("revealAndResume",revealResumeMillis);j.add("phaseMillis",timings);
             JsonObject children=new JsonObject();windows.forEach((id,h)->{if(!id.equals(sourceId))children.addProperty(id,Pointer.nativeValue(h.getPointer()));});j.add("children",children);
+            JsonObject owned=new JsonObject();processes.forEach((id,p)->{if(p.isAlive())owned.addProperty(id,p.pid());});j.add("managedProcesses",owned);
+            j.add("warmups",warmups.status());
             write(epoch.resolve("host-status.json"),j);
         }
         @Override void resize(){
@@ -275,9 +409,13 @@ public class EpochHost {
         }
         @Override void focus(){
             HWND window=windows.get(active);if(window==null)return;
-            int ours=Kernel32.INSTANCE.GetCurrentThreadId(),target=Win.API.GetWindowThreadProcessId(window,null);
-            boolean linked=ours!=target&&Win.API.AttachThreadInput(ours,target,true);
-            try{Win.API.SetFocus(window);}finally{if(linked)Win.API.AttachThreadInput(ours,target,false);}
+            Process child=processes.get(active);
+            if(!active.equals(sourceId)&&(child==null||!child.isAlive()))return;
+            long owner=active.equals(sourceId)?sourcePid:child.pid();
+            if(FocusRouter.restore(Win.API,Kernel32.INSTANCE.GetCurrentThreadId(),host,window,owner,windows.values())){
+                focusTransfers++;
+                log("Focus routed to "+active+" HWND "+Pointer.nativeValue(window.getPointer()));
+            }
         }
         @Override void attach(String id,HWND window){
             if(id.equals(sourceId))throw new IllegalArgumentException("Original top-level must never be reparented");
@@ -315,28 +453,54 @@ public class EpochHost {
             if(!sessionId.equals(catalog.get("sessionId").getAsString()))throw new IllegalStateException("Discovery session changed");
             for(JsonElement entry:catalog.getAsJsonArray("instances")){
                 JsonObject e=entry.getAsJsonObject();if(id.equals(e.get("id").getAsString())){
-                    if(!e.get("supported").getAsBoolean())throw new IllegalArgumentException("Unsupported target: "+e);
+                    if(!e.get("supported").getAsBoolean()&&!alive(id))throw new IllegalArgumentException("Unsupported target: "+e);
                     versions.put(id,e.get("version").getAsString());return e;
                 }
             }
             throw new IllegalArgumentException("Unknown instance ID: "+id);
         }
-        void prepare(String id)throws Exception{
-            targetEntry(id);if(alive(id)&&windows.containsKey(id))return;
+        Process startPreparation(String id)throws Exception{
+            targetEntry(id);
             if(id.equals(sourceId))throw new IllegalStateException("Original source unavailable");
             String python=seed.has("pythonExecutable")?seed.get("pythonExecutable").getAsString():"python";
             Path output=epoch.resolve("prepare-"+id+".log");
-            Process helper=new ProcessBuilder(python,root.resolve("scripts/launch_epoch.py").toString(),"--prepare-target",id,"--seed",seedPath.toString()).directory(root.toFile()).redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try{
-                long end=System.currentTimeMillis()+120000;
-                while(helper.isAlive()&&System.currentTimeMillis()<end){poll();Thread.sleep(100);}
-                if(helper.isAlive())throw new TimeoutException("Target preparation timed out; see "+output);
-                if(helper.exitValue()!=0)throw new IllegalStateException("Target preparation failed; see "+output);
-            }finally{if(helper.isAlive())helper.destroy();}
-            windows.remove(id);launch(id);
-            JsonObject ready=waitFor(id,null,Set.of("READY"),240000);
-            attach(id,new HWND(new Pointer(ready.get("windowHandle").getAsLong())));
-            action(id,"freeze","FROZEN");
+            return new ProcessBuilder(python,root.resolve("scripts/launch_epoch.py").toString(),"--prepare-target",id,"--seed",seedPath.toString()).directory(root.toFile()).redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        }
+        void warmup(String id)throws Exception{
+            targetEntry(id);
+            if(id.equals(active)||id.equals(sourceId))return;
+            warmups.request(id,System.currentTimeMillis());status();
+        }
+        void readWarmupRequests()throws Exception{
+            Path directory=epoch.resolve("warmup-requests");if(!Files.isDirectory(directory))return;
+            try(DirectoryStream<Path> files=Files.newDirectoryStream(directory,"*.json")){
+                for(Path path:files){
+                    try{
+                        JsonObject request=read(path);Files.deleteIfExists(path);
+                        if(!request.has("sessionId")||!sessionId.equals(request.get("sessionId").getAsString()))continue;
+                        if(!"warmup".equals(request.get("action").getAsString()))continue;
+                        warmup(request.get("targetId").getAsString());
+                    }catch(NoSuchFileException|AccessDeniedException ignored){}
+                    catch(Exception failure){Files.deleteIfExists(path);log("Warmup request rejected: "+failure);}
+                }
+            }
+        }
+        void prepare(String id)throws Exception{
+            targetEntry(id);
+            Warmups.Job job=warmups.jobs.get(id);
+            // An attached client is reusable only after its initial freeze was acknowledged.
+            if(alive(id)&&windows.containsKey(id)&&(job==null||job.phase.equals("READY")))return;
+            job=warmups.request(id,System.currentTimeMillis());
+            while(!closing&&job.pending()){
+                poll();
+                try{
+                    JsonObject request=read(epoch.resolve("host-command.json"));
+                    if("shutdown".equals(request.get("action").getAsString()))closing=true;
+                }catch(NoSuchFileException|AccessDeniedException|JsonParseException ignored){}
+                if(job.pending())Thread.sleep(100);
+            }
+            if(closing)throw new CancellationException("Host closing");
+            if(!job.phase.equals("READY"))throw new IllegalStateException(job.error);
         }
         void switchTo(String target)throws Exception{
             if(target==null||target.isBlank())throw new IllegalArgumentException("Adopted switch requires targetId");
@@ -369,6 +533,10 @@ public class EpochHost {
         void handle(JsonObject j)throws Exception{
             String action=j.get("action").getAsString();
             if(action.equals("shutdown")){closing=true;return;}
+            if(action.equals("warmup")){
+                if(j.has("sessionId")&&sessionId.equals(j.get("sessionId").getAsString())&&j.has("targetId"))warmup(j.get("targetId").getAsString());
+                return;
+            }
             if(action.equals("switch")){
                 if(!j.has("targetId")){error="Select an instance: targetId is required";status();return;}
                 switchTo(j.get("targetId").getAsString());
@@ -394,6 +562,8 @@ public class EpochHost {
         }
         @Override void shutdown(){
             log("Adopted coordinator shutdown; original process is unowned");
+            acceptingWarmups=false;
+            warmups.cancelPending();
             // Do not kill or reparent a user-launched root, including error paths.
             // Before an explicit helper shutdown, bring the latest world back to
             // the root if possible so leaving the helper does not lose a handoff.

@@ -17,10 +17,13 @@ foreach ($module in @('forge120','forge118','forge116','forge112','forge1710')) 
 }
 & (Join-Path $EpochRoot 'tests\test_shared.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Shared tests failed' }
+& (Join-Path $EpochRoot 'tests\test_projection_launchwrapper.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'Packaged legacy cache tests failed' }
 python -m unittest discover -s (Join-Path $EpochRoot 'tests') -p 'test_*.py' -v
 if ($LASTEXITCODE -ne 0) { throw 'Python discovery, deployment, and bootstrap tests failed' }
 python (Join-Path $PSScriptRoot 'launch_epoch.py') --build-only
 if ($LASTEXITCODE -ne 0) { throw 'Host build failed' }
+& (Join-Path $EpochRoot 'tests\test_host_focus.ps1')
 & (Join-Path $EpochRoot 'host\legacy\build.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Legacy window components failed' }
 & (Join-Path $PSScriptRoot 'install_mods.ps1')

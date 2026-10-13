@@ -318,7 +318,7 @@ def main():
 if __name__=='__main__':
     try:main()
     except Exception as error:
-        for flag in ('--adopt','--seed'):
+        for flag in (() if '--prepare-target' in sys.argv else ('--adopt','--seed')):
             if flag in sys.argv:
                 try:
                     path=pathlib.Path(sys.argv[sys.argv.index(flag)+1]);seed=load_json(path)

@@ -1,0 +1,174 @@
+package dev.epoch;
+
+import dev.epoch.bridge.Appearance;
+import dev.epoch.bridge.AppearanceAnimation;
+import com.mojang.blaze3d.vertex.*;
+import com.mojang.blaze3d.platform.NativeImage;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.*;
+import net.minecraft.client.renderer.block.model.BakedQuad;
+import net.minecraft.client.renderer.blockentity.*;
+import net.minecraft.client.renderer.texture.*;
+import net.minecraft.client.resources.model.BakedModel;
+import net.minecraft.core.Direction;
+import net.minecraft.nbt.*;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.item.*;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraftforge.api.distmarker.Dist;
+import net.minecraftforge.client.event.EntityRenderersEvent;
+import net.minecraftforge.client.extensions.common.IClientItemExtensions;
+import net.minecraftforge.eventbus.api.SubscribeEvent;
+import net.minecraftforge.fml.common.Mod;
+import java.util.*;
+import java.io.*;
+
+/** All native model/texture access stays on the client render thread. */
+@Mod.EventBusSubscriber(modid="epoch", bus=Mod.EventBusSubscriber.Bus.MOD, value=Dist.CLIENT)
+public final class AppearanceClient {
+    private static final Map<ResourceLocation,String> exported = new HashMap<>();
+    private static final Map<String,Material> textures = new HashMap<>();
+    private static Material fallbackMaterial;
+    private static final Direction[] DIRECTIONS = Direction.values();
+    private static final net.minecraft.core.BlockPos.MutableBlockPos NEIGHBOR = new net.minecraft.core.BlockPos.MutableBlockPos();
+    private static final class Material {
+        final ResourceLocation location;
+        final DynamicTexture texture;
+        final AppearanceAnimation animation;
+        final int[] pixels;
+        final RenderType renderType;
+        Material(byte[] png) throws IOException {
+            animation = new AppearanceAnimation(png);
+            pixels = new int[animation.width * animation.height];
+            texture = new DynamicTexture(new NativeImage(animation.width, animation.height, false));
+            location = Minecraft.getInstance().getTextureManager().register("epoch_appearance", texture);
+            renderType = animation.translucent ? RenderType.entityTranslucent(location) : RenderType.entityCutout(location);
+        }
+        void update(long frame) {
+            if (!animation.update(pixels, frame, true)) return;
+            NativeImage image = texture.getPixels();
+            for (int y=0;y<animation.height;y++) for (int x=0;x<animation.width;x++)
+                image.setPixelRGBA(x,y,pixels[y*animation.width+x]);
+            texture.upload();
+        }
+    }
+    private static final ResourceLocation FALLBACK = new ResourceLocation("epoch", "textures/block/unknown_block.png");
+    @SubscribeEvent public static void renderers(EntityRenderersEvent.RegisterRenderers event) {
+        event.registerBlockEntityRenderer(Epoch.UNKNOWN_ENTITY.get(), context -> new Blocks());
+    }
+    @SubscribeEvent public static void reloadSetup(net.minecraftforge.fml.event.lifecycle.FMLClientSetupEvent event) {
+        event.enqueueWork(() -> ((net.minecraft.server.packs.resources.ReloadableResourceManager)Minecraft.getInstance().getResourceManager()).registerReloadListener((net.minecraft.server.packs.resources.ResourceManagerReloadListener) manager -> reset()));
+    }
+    private static void reset() {
+        for (Material material : textures.values()) Minecraft.getInstance().getTextureManager().release(material.location);
+        if (fallbackMaterial != null) Minecraft.getInstance().getTextureManager().release(fallbackMaterial.location);
+        fallbackMaterial = null;
+        textures.clear(); exported.clear(); Appearance.reload();
+    }
+    static void tick() { if (Minecraft.getInstance().level != null) Appearance.tick(AppearanceClient::bake); }
+    private static Appearance.Mesh bake(String text) throws Exception {
+        Minecraft mc = Minecraft.getInstance();
+        CompoundTag tag = TagParser.parseTag(text);
+        BlockState state = NbtUtils.readBlockState(net.minecraft.core.registries.BuiltInRegistries.BLOCK.asLookup(), tag);
+        if (state.isAir() || state.getBlock() == Epoch.UNKNOWN.get()) return null;
+        BakedModel model = mc.getBlockRenderer().getBlockModel(state);
+        Appearance.Mesh mesh = new Appearance.Mesh();
+        List<Direction> sides = new ArrayList<>(Arrays.asList(Direction.values())); sides.add(null);
+        for (Direction side : sides) for (BakedQuad quad : model.getQuads(state, side, net.minecraft.util.RandomSource.create(42))) {
+            TextureAtlasSprite sprite = quad.getSprite(); ResourceLocation name = sprite.contents().name();
+            String texture = exported.get(name);
+            if (texture == null) {
+                ResourceLocation location = new ResourceLocation(name.getNamespace(), "textures/" + name.getPath() + ".png");
+                texture = Appearance.texture(Appearance.firstFrame(Appearance.bytes(mc.getResourceManager().open(location))));
+                exported.put(name, texture);
+            }
+            Appearance.Face face = new Appearance.Face(); face.texture = texture;
+            Direction normal = quad.getDirection(); face.nx = normal.getStepX(); face.ny = normal.getStepY(); face.nz = normal.getStepZ();
+            if (quad.isTinted()) face.color = mc.getBlockColors().getColor(state, mc.level, mc.player == null ? net.minecraft.core.BlockPos.ZERO : mc.player.blockPosition(), quad.getTintIndex());
+            int[] data = quad.getVertices(); int stride = data.length / 4;
+            for (int i=0;i<4;i++) {
+                for(int j=0;j<3;j++) face.vertices[i*5+j] = Float.intBitsToFloat(data[i*stride+j]);
+                face.vertices[i*5+3] = (Float.intBitsToFloat(data[i*stride+4])-sprite.getU0())/(sprite.getU1()-sprite.getU0());
+                face.vertices[i*5+4] = (Float.intBitsToFloat(data[i*stride+5])-sprite.getV0())/(sprite.getV1()-sprite.getV0());
+            }
+            mesh.faces.add(face);
+        }
+        mesh.occludes=state.isSolidRender(mc.level,mc.player == null ? net.minecraft.core.BlockPos.ZERO : mc.player.blockPosition());
+        return mesh;
+    }
+    private static Material material(String source, String id) {
+        Material found = id == null ? fallbackMaterial : textures.get(id);
+        if (found != null) return found;
+        try {
+            if (id == null) {
+                fallbackMaterial = new Material(Appearance.bytes(Minecraft.getInstance().getResourceManager().open(FALLBACK)));
+                return fallbackMaterial;
+            }
+            byte[] png = Appearance.image(source,id);
+            if (png == null) return material(source,null);
+            Material result = new Material(png); textures.put(id,result); return result;
+        } catch (IOException error) { return null; }
+    }
+    static void draw(String source, String version, String state, PoseStack pose, MultiBufferSource buffers, int light, int overlay, int hidden) {
+        source=Appearance.source(source,version);
+        Appearance.Mesh mesh = Appearance.get(source, state);
+        if (mesh == null) mesh = fallback();
+        long frame = AppearanceAnimation.frame();
+        Material previous = null;
+        VertexConsumer out = null;
+        for (Appearance.Face face : mesh.faces) {
+            int side=Appearance.boundary(face);if(side>=0&&(hidden&(1<<side))!=0)continue;
+            Material selected = material(source,face.texture);
+            if (selected == null) continue;
+            if (selected != previous) {
+                selected.update(frame);
+                out = buffers.getBuffer(selected.renderType); previous = selected;
+            }
+            float red=((face.color>>16)&255)/255f, green=((face.color>>8)&255)/255f, blue=(face.color&255)/255f;
+            for (int i=0;i<4;i++) vertex(out,pose,face,i,red,green,blue,light,overlay);
+        }
+    }
+    private static void vertex(VertexConsumer out, PoseStack pose, Appearance.Face f, int index, float r, float g, float blue, int light, int overlay) {
+        float[] v=f.vertices; int offset=index*5;
+        out.vertex(pose.last().pose(),v[offset],v[offset+1],v[offset+2]).color(r,g,blue,1).uv(v[offset+3],v[offset+4])
+            .overlayCoords(overlay).uv2(light).normal(pose.last().normal(),f.nx,f.ny,f.nz).endVertex();
+    }
+    private static final Appearance.Mesh CUBE = makeFallback();
+    private static Appearance.Mesh fallback() { return CUBE; }
+    private static Appearance.Mesh makeFallback() {
+        Appearance.Mesh mesh = new Appearance.Mesh();
+        float[][] faces={{0,0,0, 0,0,1, 0,1,1, 0,1,0},{1,0,1, 1,0,0, 1,1,0, 1,1,1},{0,0,1, 0,0,0, 1,0,0, 1,0,1},{0,1,0, 0,1,1, 1,1,1, 1,1,0},{1,0,0, 0,0,0, 0,1,0, 1,1,0},{0,0,1, 1,0,1, 1,1,1, 0,1,1}};
+        int[][] normals={{-1,0,0},{1,0,0},{0,-1,0},{0,1,0},{0,0,-1},{0,0,1}};
+        for(int n=0;n<6;n++){Appearance.Face f=new Appearance.Face();f.nx=normals[n][0];f.ny=normals[n][1];f.nz=normals[n][2];for(int i=0;i<4;i++){for(int j=0;j<3;j++)f.vertices[i*5+j]=faces[n][i*3+j];f.vertices[i*5+3]=(i==1||i==2)?1:0;f.vertices[i*5+4]=i<2?1:0;}mesh.faces.add(f);}return mesh;
+    }
+    private static int hidden(Epoch.UnknownEntity tile) {
+        if(tile.getLevel()==null)return 0;int mask=0;
+        for(Direction side:DIRECTIONS){
+            net.minecraft.core.BlockPos pos=NEIGHBOR.set(tile.getBlockPos().getX()+side.getStepX(),tile.getBlockPos().getY()+side.getStepY(),tile.getBlockPos().getZ()+side.getStepZ());
+            if(tile.getLevel().getBlockState(pos).isSolidRender(tile.getLevel(),pos))mask|=1<<side.get3DDataValue();
+            else { net.minecraft.world.level.block.entity.BlockEntity neighbor=tile.getLevel().getBlockEntity(pos);
+                if(neighbor instanceof Epoch.UnknownEntity){Epoch.UnknownEntity other=(Epoch.UnknownEntity)neighbor;
+                    Appearance.Mesh mesh=Appearance.get(Appearance.source(other.sourceInstance,other.sourceVersion),other.originalState);
+                    if(mesh!=null&&mesh.occludes)mask|=1<<side.get3DDataValue();
+                }
+            }
+        }return mask;
+    }
+    public static final class Blocks implements BlockEntityRenderer<Epoch.UnknownEntity> {
+        public void render(Epoch.UnknownEntity tile, float partial, PoseStack pose, MultiBufferSource buffers, int light, int overlay) { draw(tile.sourceInstance,tile.sourceVersion,tile.originalState,pose,buffers,light,overlay,hidden(tile)); }
+    }
+    public static final class UnknownItem extends BlockItem {
+        public UnknownItem() { super(Epoch.UNKNOWN.get(), new Item.Properties()); }
+        @Override public void initializeClient(java.util.function.Consumer<IClientItemExtensions> consumer) {
+            consumer.accept(new IClientItemExtensions() { public BlockEntityWithoutLevelRenderer getCustomRenderer() { return Items.INSTANCE; } });
+        }
+    }
+    public static final class Items extends BlockEntityWithoutLevelRenderer {
+        static final Items INSTANCE = new Items();
+        Items() { super(Minecraft.getInstance().getBlockEntityRenderDispatcher(), Minecraft.getInstance().getEntityModels()); }
+        @Override public void renderByItem(ItemStack stack, ItemDisplayContext context, PoseStack pose, MultiBufferSource buffers, int light, int overlay) {
+            CompoundTag tag = stack.getTagElement("BlockEntityTag");
+            draw(tag == null ? "" : tag.getString("SourceInstance"), tag == null ? "" : tag.getString("SourceVersion"), tag == null ? "" : tag.getString("OriginalState"), pose,buffers,light,overlay,0);
+        }
+    }
+}

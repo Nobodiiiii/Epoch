@@ -27,8 +27,10 @@ public final class VersionListScreen extends Screen {
   for(int i=first;i<entries.size()&&i<first+visibleRows;i++){
    AutoRuntime.Instance entry=entries.get(i);int y=48+(i-first)*40;
    String label=entry.label+" | "+entry.version+" / Forge "+entry.forgeVersion+(entry.current?" [Current]":!entry.supported?" [Unavailable]":"");
-   Button button=addRenderableWidget(new Button(left,y,rowWidth,20,new TextComponent(font.plainSubstrByWidth(label,rowWidth-12)),b->choose(entry)));
+   Button button=addRenderableWidget(new Button(left,y,rowWidth-86,20,new TextComponent(font.plainSubstrByWidth(label,rowWidth-98)),b->choose(entry)));
    button.active=entry.supported&&!entry.current;
+   Button warmup=addRenderableWidget(new Button(left+rowWidth-80,y,80,20,new TextComponent(entry.warmupLabel()),b->warmup(entry)));
+   warmup.active=entry.canWarmup();
   }
   int bottom=height-28;
   Button previous=addRenderableWidget(new Button(left,bottom,28,20,new TextComponent("<"),b->page(-visibleRows)));previous.active=first>0;
@@ -39,6 +41,9 @@ public final class VersionListScreen extends Screen {
  }
  private void choose(AutoRuntime.Instance entry){
   try{AutoRuntime.select(minecraft.gameDirectory.toPath(),Epoch.VERSION,entry.id);onClose();}catch(Exception ex){error=ex.getMessage()==null?ex.toString():ex.getMessage();reload();}
+ }
+ private void warmup(AutoRuntime.Instance entry){
+  try{AutoRuntime.warmup(minecraft.gameDirectory.toPath(),Epoch.VERSION,entry.id);error="";}catch(Exception ex){error=ex.getMessage()==null?ex.toString():ex.getMessage();}reload();
  }
  private void page(int delta){first=Math.max(0,Math.min(first+delta,Math.max(0,entries.size()-visibleRows)));reload();}
  public boolean mouseScrolled(double x,double y,double delta){if(delta!=0){page(delta>0?-1:1);return true;}return super.mouseScrolled(x,y,delta);}
@@ -52,7 +57,7 @@ public final class VersionListScreen extends Screen {
   int rowWidth=Math.min(430,width-32),left=(width-rowWidth)/2;
   for(int i=first;i<entries.size()&&i<first+visibleRows;i++){
    AutoRuntime.Instance entry=entries.get(i);
-   String detail=entry.current?"You are playing this instance":entry.supported?"Select to prepare this version":entry.reason;
+   String detail=entry.detail();
    drawString(stack,font,font.plainSubstrByWidth(detail==null?"Unavailable":detail,rowWidth),left+4,71+(i-first)*40,entry.supported?0xB8C1C8:0xD4A080);
   }
   if(entries.isEmpty())drawCenteredString(stack,font,"No local instances found. Use Refresh to scan again.",width/2,58,0xB8C1C8);

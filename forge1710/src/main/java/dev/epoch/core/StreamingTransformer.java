@@ -12,12 +12,20 @@ public final class StreamingTransformer implements IClassTransformer, Opcodes {
         return new MethodInsnNode(INVOKESTATIC, HOOK, name, descriptor, false);
     }
     public byte[] transform(String name, String transformedName, byte[] bytes) {
-        if (bytes == null || !Boolean.getBoolean("epoch.streaming")) return bytes;
-        boolean provider = transformedName.equals("net.minecraft.world.gen.ChunkProviderServer");
+        if (bytes == null) return bytes;
+        boolean streaming = Boolean.getBoolean("epoch.streaming");
+        boolean provider = streaming && transformedName.equals("net.minecraft.world.gen.ChunkProviderServer");
         boolean loader = transformedName.equals("net.minecraft.world.chunk.storage.AnvilChunkLoader");
         boolean chunk = transformedName.equals("net.minecraft.world.chunk.Chunk");
         if (!provider && !loader && !chunk) return bytes;
         ClassNode node = new ClassNode(); new ClassReader(bytes).accept(node, 0);
+        String pendingField = null, lockField = null;
+        if (loader) for (Object value : node.fields) {
+            FieldNode field = (FieldNode)value;
+            if (field.desc.equals("Ljava/util/List;") && (field.name.equals("chunksToRemove") || field.name.equals("field_75828_a"))) pendingField = field.name;
+            if (field.desc.equals("Ljava/lang/Object;") && (field.name.equals("syncLockObject") || field.name.equals("field_75827_c"))) lockField = field.name;
+        }
+        if (loader && streaming && (pendingField == null || lockField == null)) throw new IllegalStateException("Epoch missing native save queue fields");
         int hooks = 0;
         for (Object value : node.methods) {
             MethodNode method=(MethodNode)value;
@@ -35,6 +43,14 @@ public final class StreamingTransformer implements IClassTransformer, Opcodes {
                 InsnList code = new InsnList(); code.add(new VarInsnNode(ALOAD, 1)); code.add(new VarInsnNode(ALOAD, 2)); code.add(new VarInsnNode(ALOAD, 3));
                 code.add(call("beforeEntities", method.desc)); method.instructions.insert(code); hooks++;
             }
+            if (loader && streaming && (method.name.equals("saveChunk") || method.name.equals("func_75816_a"))
+                    && method.desc.equals("(Lnet/minecraft/world/World;L" + CHUNK + ";)V")) {
+                InsnList code = new InsnList();
+                code.add(new VarInsnNode(ALOAD, 0)); code.add(new FieldInsnNode(GETFIELD, node.name, pendingField, "Ljava/util/List;"));
+                code.add(new VarInsnNode(ALOAD, 0)); code.add(new FieldInsnNode(GETFIELD, node.name, lockField, "Ljava/lang/Object;"));
+                code.add(new MethodInsnNode(INVOKESTATIC, "dev/epoch/NativeSaveQueue", "awaitCapacity", "(Ljava/util/List;Ljava/lang/Object;)V", false));
+                method.instructions.insert(code); hooks++;
+            }
             if (chunk && (method.name.equals("setChunkModified") || method.name.equals("func_76630_e")) && method.desc.equals("()V")) {
                 InsnList code = new InsnList(); code.add(new VarInsnNode(ALOAD, 0)); code.add(call("dirty", "(L" + CHUNK + ";)V"));
                 method.instructions.insert(code); hooks++;
@@ -48,7 +64,7 @@ public final class StreamingTransformer implements IClassTransformer, Opcodes {
                 hooks++;
             }
         }
-        if (hooks != (chunk ? 3 : 1)) throw new IllegalStateException("Epoch missing native hooks in " + transformedName + ": " + hooks);
+        if (hooks != (chunk ? 3 : loader ? (streaming ? 2 : 1) : 1)) throw new IllegalStateException("Epoch missing native hooks in " + transformedName + ": " + hooks);
         ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS); node.accept(writer); return writer.toByteArray();
     }
 }

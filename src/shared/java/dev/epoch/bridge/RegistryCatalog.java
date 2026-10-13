@@ -16,10 +16,12 @@ public final class RegistryCatalog {
 
     public static final class State {
         public String block, snbt;
+        public String nativeState, enumeration;
         public boolean blockEntity;
         public State(String block, String snbt, boolean blockEntity) {
             this.block = block; this.snbt = snbt; this.blockEntity = blockEntity;
         }
+        public State nativeSource(String value,String kind) { nativeState=value;enumeration=kind;return this; }
     }
 
     public RegistryCatalog(String version, Map<String, String> mods) {
@@ -70,6 +72,7 @@ public final class RegistryCatalog {
             if (state.blockEntity) entityStates++;
             Map<String, Object> row = new LinkedHashMap<String, Object>();
             row.put("block", state.block); row.put("snbt", state.snbt);
+            if(state.nativeState!=null){row.put("nativeState",state.nativeState);row.put("enumeration",state.enumeration);}
             row.put("requiresPayloadCheck", state.blockEntity);
             row.put("result", outcome); details.add(row);
         }

@@ -10,8 +10,18 @@ import java.util.zip.*;
 
 /** Version-neutral block snapshot. Payload NBT is never parsed or narrowed here. */
 public final class Snapshot {
+    public transient BlockPreservation preservation;
+    public void preserveBlocks() { if(preservation==null)preservation=new BlockPreservation(palette,runs,blockEntities); }
+    public String originalState(int index) { preserveBlocks();return preservation.state(index); }
+    public String originalPayload(int index) { preserveBlocks();return preservation.payload(index); }
     public int schema = 1;
     public String version = "";
+    public String sourceInstance = "";
+    public Map<String, String> appearanceSources = new TreeMap<String, String>();
+    public String appearanceSource(int index) {
+        String value = appearanceSources.get(Integer.toString(index));
+        return value == null ? sourceInstance : value;
+    }
     public int x0 = -32, y0 = 0, z0 = -32, sizeX = 64, sizeY = 256, sizeZ = 64;
     public List<String> palette = new ArrayList<String>();
     public int[] runs = new int[0];
@@ -63,6 +73,13 @@ public final class Snapshot {
         if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z) || !Float.isFinite(yaw) || !Float.isFinite(pitch))
             throw new IOException("Non-finite player camera");
         if (selectedSlot < 0 || selectedSlot > 8) throw new IOException("Invalid selected slot");
+        if (sourceInstance == null || (!sourceInstance.isEmpty() && !sourceInstance.matches("[A-Za-z0-9_.-]{1,128}")) || appearanceSources == null || appearanceSources.size() > total)
+            throw new IOException("Invalid appearance provenance");
+        for (Map.Entry<String, String> entry : appearanceSources.entrySet()) {
+            try { int index = Integer.parseInt(entry.getKey());
+                if (index < 0 || index >= total || entry.getValue() == null || (!entry.getValue().isEmpty() && !entry.getValue().matches("[A-Za-z0-9_.-]{1,128}"))) throw new IllegalArgumentException();
+            } catch (RuntimeException bad) { throw new IOException("Invalid appearance source", bad); }
+        }
         if (extras != null) extras.validate(this);
     }
 

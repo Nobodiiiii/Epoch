@@ -1,5 +1,70 @@
 # Epoch 0.2 — validation status, 2026-10-01
 
+## 1.20.1 to 1.7.10 native save memory pressure, 2026-10-05
+
+The 21:34:37 (Asia/Shanghai) handoff completed in 9,460 ms. At 21:35:42,
+the 1.7.10 integrated server reported `OutOfMemoryError: GC overhead limit exceeded`
+with `-Xmx3G`; the native File IO Thread also failed while compressing Anvil NBT.
+The last status recorded 1,221 resident chunks and 70,914 placeholders in the
+handoff region. A read-only scan found 5,364,157 saved placeholder records across
+2,149 chunks in the target save; this is an on-disk total, not a live heap count.
+The original logs, crash report, status and counts are retained under
+`build/oom-1710-20261005/`. No live heap dump was available after manual exit.
+
+Vanilla 1.7.10 queues uncompressed chunk NBT without a capacity limit. Dense
+placeholder saves can therefore retain far more memory than their compressed
+region files suggest. The streaming transformer now waits for fewer than eight
+pending native saves before serializing another chunk, using the loader's own
+queue lock and existing IO worker. A stalled or interrupted writer stops the
+world instead of silently discarding saves. Status now includes native save wait
+time, heap use and the resident tile count. Existing NBT and save formats are
+unchanged.
+
+`nativeSaveQueueTest` exercises the transformed native serializer, File IO Thread
+and region reader without launching a game/window. With the hook disabled, a
+briefly blocked writer accumulated 53 chunks and failed the capacity assertion.
+With the fix, the queue peaked at eight and all 128 chunks / 640,000 placeholder
+states, payloads and source identities roundtripped with a 256 MiB heap. Timeout
+and interruption checks also passed. The full offline 1.7.10 build, legacy,
+environment/item and seamless compatibility checks passed. The installed
+1.7.10 adapter matches the build by SHA-256; installation backs up the previous
+JAR. No user save was changed by this investigation or regression test.
+
+This verifies and fixes unbounded native save accumulation, a likely contributor
+to this OOM. It does not establish the incident's full live heap breakdown or
+verify a restarted handoff and continued play in the user's original world.
+
+## Adopted-window focus recovery, 2026-10-05
+
+The 18:36:04 (Asia/Shanghai) 1.20.1 -> 1.12.2 handoff completed successfully.
+The host remained `READY`, and the target kept publishing heartbeats with
+`clientFrozen=false`, `movementInput.inGameFocus=false`,
+`movementInput.displayActive=false` and no open game screen. The adopted host
+only called `SetFocus` during reveal; unlike its Swing mode, it had no recovery
+path when Windows later reactivated the original top-level source HWND. LWJGL 2
+updates `Display.isActive()` from `WM_SETFOCUS`/`WM_KILLFOCUS`; activating the
+source does not give the embedded target that focus event.
+
+The adopted coordinator now checks focus in its existing 100 ms poll while
+`READY` or `PREPARING`. It routes focus to the selected visible child only when
+the original game root is already foreground. It checks the target input queue,
+HWND ownership, visibility, enabled state and root, leaves menus, move/size,
+mouse capture and unrelated controls alone, and rechecks after input attachment.
+An already focused child incurs no attachment or key-state reset. The ordinary
+source remains unmanaged between handoffs. Confirmed transfers are recorded in
+`host.log` and `host-status.json.focusTransfers`.
+
+`tests/test_host_focus.ps1` passed 223 assertions for repeated reactivation,
+background/minimized/hidden/disabled windows, modal/menu/drag states, stale HWNDs,
+attachment failure, state races, transfer verification and queue cleanup.
+All 9 bootstrap tests passed, and `launch_epoch.py --build-only` compiled the
+updated host. The focus regression also runs from `scripts/build.ps1`.
+All native observations and mutations in the regression are simulated; no
+desktop automation or image reading was used. Physical click/Alt-Tab recovery
+in Minecraft remains unverified. The running coordinator retains its old loaded
+classes; restart the game session to load the updated host. No adapter or native
+DLL replacement is required for this host-only fix.
+
 ## Empty source-region load failure, 2026-10-05
 
 The 15:30:41 1.16.5 server crash after returning from 1.20.1 reported
@@ -235,3 +300,8 @@ Validation:
 The user's original 1.7.10 log and status were copied to
 `build/diagnostics/legacy-chunks/reported-latest.log` and `reported-status.json`
 before launching tests. Runtime tests use new isolated saves.
+# Parallel prewarming (2026-10-06)
+
+All five version-list screens now provide an independent prewarm action. The host runs target preparation as cooperative jobs: helper processes and Minecraft startup can overlap, while window attachment and IPC stay on the coordinator thread. A target becomes ready only after client render readiness and the matching freeze acknowledgement. Prewarming does not export the active world, select a version, or resume a target.
+
+Validated with `HostWarmupTest` (parallel startup, deduplication, readiness acknowledgement, independent failures, retry, timeout, cancellation and exited clients), `AutoRuntimeTest` (separate session-bound requests, no switch request, immediate pending state, retries and stale-host rejection), and Python discovery tests for managed clients before window attachment. The complete shared tests, 57 Python tests, host focus tests, and all five offline adapter builds passed. Current build artifacts were inspected for the prewarm UI and request protocol before installation. No real-client UI or visual verification was performed for this feature.

@@ -7,6 +7,7 @@ public final class RegistryAudit {
   net.minecraft.util.registry.Bootstrap.bootStrap();
   Map<String,String> mods = Collections.singletonMap("minecraft",Epoch.VERSION);
   NativeStates.Context context = new NativeStates.Context(CompatibilityRules.load(CompatibilityRules.directory()),mods);
+  SeamlessModernTest.run(context);
   String dry="{Name:\"minecraft:jungle_leaves\",Properties:{distance:\"1\",persistent:\"true\",waterlogged:\"false\"}}";
   if(context.materialize(context.resolve(dry))==null) throw new AssertionError("Dry jungle leaves rejected by native registry");
   boolean wet=context.resolve(dry.replace("false", "true")).compatible();

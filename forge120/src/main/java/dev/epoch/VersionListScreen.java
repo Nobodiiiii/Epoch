@@ -48,7 +48,8 @@ final class VersionListScreen extends Screen {
     StringBuilder text = new StringBuilder();
     for (AutoRuntime.Instance entry : entries)
       text.append(entry.id).append('|').append(entry.label).append('|').append(entry.current)
-          .append('|').append(entry.supported).append('|').append(entry.reason).append('\n');
+          .append('|').append(entry.supported).append('|').append(entry.reason)
+          .append('|').append(entry.warmupPhase).append('|').append(entry.warmupError).append('|').append(entry.warmupAvailable).append('\n');
     return text.toString();
   }
 
@@ -62,12 +63,17 @@ final class VersionListScreen extends Screen {
       String label = instance.label + " | " + instance.version + " / Forge " + instance.forgeVersion;
       if (instance.current) label += " [Current]";
       else if (!instance.supported) label += " [Unavailable]";
-      Button button = Button.builder(Component.literal(label), b -> select(instance))
-          .bounds((width - listWidth) / 2, 66 + i * 27, listWidth, 22).build();
+      int selectWidth = listWidth - 86;
+      Button button = Button.builder(Component.literal(font.plainSubstrByWidth(label, selectWidth - 12)), b -> select(instance))
+          .bounds((width - listWidth) / 2, 66 + i * 27, selectWidth, 22).build();
       button.active = instance.supported && !instance.current;
-      button.setTooltip(Tooltip.create(Component.literal(instance.current ? "You are playing this instance"
-          : instance.supported ? instance.gameDir.toString() : String.valueOf(instance.reason))));
+      button.setTooltip(Tooltip.create(Component.literal(label + "\n" + instance.detail() + "\n" + instance.gameDir)));
       addRenderableWidget(button);
+      Button warmup = Button.builder(Component.literal(instance.warmupLabel()), b -> warmup(instance))
+          .bounds((width + listWidth) / 2 - 80, 66 + i * 27, 80, 22).build();
+      warmup.active = instance.canWarmup();
+      warmup.setTooltip(Tooltip.create(Component.literal(instance.detail())));
+      addRenderableWidget(warmup);
     }
     int y = height - 70;
     Button previous = Button.builder(Component.literal("Previous"), b -> {
@@ -101,6 +107,17 @@ final class VersionListScreen extends Screen {
     }
   }
 
+  private void warmup(AutoRuntime.Instance instance) {
+    try {
+      AutoRuntime.warmup(gameDir, Epoch.VERSION, instance.id);
+      error = "";
+    } catch (Exception exception) {
+      error = exception.getMessage() == null ? exception.toString() : exception.getMessage();
+    }
+    instances = AutoRuntime.instances(gameDir);
+    rebuild();
+  }
+
   @Override
   public boolean mouseScrolled(double x, double y, double amount) {
     int next = Math.max(0, Math.min(offset - (int) Math.signum(amount), Math.max(0, instances.size() - visibleRows)));
@@ -122,7 +139,7 @@ final class VersionListScreen extends Screen {
     renderBackground(graphics);
     graphics.drawCenteredString(font, title, width / 2, 15, 0xffffff);
     graphics.drawCenteredString(font, "Single player • shared region: X/Z -32..31, Y 0..255", width / 2, 32, 0xaaaaaa);
-    graphics.drawCenteredString(font, "First startup can take time. Keep playing while the target prepares.", width / 2, 46, 0xaaaaaa);
+    graphics.drawCenteredString(font, "预热可并行准备多个版本，不切换当前版本", width / 2, 46, 0xaaaaaa);
     if (instances.isEmpty())
       graphics.drawCenteredString(font, "No instances found. Place Forge instances in this .minecraft directory.", width / 2, 76, 0xdddddd);
     String status = error.isEmpty() ? runtimeStatus : error;

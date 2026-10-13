@@ -93,6 +93,7 @@ public class ClientHooks {
   synchronized(readyLock){bridge().clientReady=mc.level!=null&&mc.player!=null&&(mc.screen==null||mc.screen instanceof FreezeScreen)&&++renderTicks>20&&mc.levelRenderer.hasRenderedAllChunks();}
  }
  @SubscribeEvent public static void tick(TickEvent.ClientTickEvent e){
+  if(e.phase==TickEvent.Phase.START) AppearanceClient.tick();
   Minecraft mc=Minecraft.getInstance();lockPose(mc);if(e.phase!=TickEvent.Phase.END)return;
   dev.epoch.bridge.JourneyMapOrigins.tick(bridge().diagnostics,mc.level!=null&&mc.player!=null);
   if(mc.level!=null&&mc.player!=null&&mc.hasSingleplayerServer()){

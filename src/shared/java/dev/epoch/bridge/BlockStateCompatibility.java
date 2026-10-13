@@ -39,6 +39,9 @@ public final class BlockStateCompatibility {
                           String property, String value, List<String> rules) {
         return new Result(block, properties, rules, reason, property, value);
     }
+    public static Result unresolved(String block,String reason) {
+        return failure(block,Collections.<String,String>emptyMap(),reason,null,null,Collections.<String>emptyList());
+    }
 
     static Result validate(String block, Map<String, String> properties,
                            Map<String, Set<String>> schema, List<String> rules) {

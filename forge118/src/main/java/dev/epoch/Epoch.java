@@ -165,6 +165,7 @@ public class Epoch {
   }
 
   public Epoch() {
+    HandoffFence.register();
     instance = this;
     IEventBus bus = FMLJavaModLoadingContext.get().getModEventBus();
     BLOCKS.register(bus);
@@ -180,6 +181,7 @@ public class Epoch {
   }
 
   void renderTick(TickEvent.RenderTickEvent event) {
+    if (event.phase == TickEvent.Phase.START) AppearanceClient.tick();
     if (event.phase == TickEvent.Phase.START) {
       enforceClientPose();
       return;
@@ -382,11 +384,12 @@ public class Epoch {
           break;
         case "export":
           frozen = true;
-          StreamingWorld.flush(server.overworld());
           java.util.concurrent.CompletableFuture<double[]> capture =
               new java.util.concurrent.CompletableFuture<>();
           frameCapture = capture;
           double[] camera = capture.get(15, java.util.concurrent.TimeUnit.SECONDS);
+          bridge().diagnostics.put("exportInputWaitMillis", HandoffFence.drain(server, player(server).connection.connection));
+          StreamingWorld.flush(server.overworld());
           Snapshot snapshot = exportWorld(server);
           snapshot.x = camera[0];
           snapshot.y = camera[1];
@@ -509,7 +512,7 @@ public class Epoch {
     ServerLevel level = server.overworld();
     Snapshot s = new Snapshot();
     StreamingWorld.configureSnapshot(level, s, p.getX(), p.getZ());
-    s.version = VERSION;
+    s.version = VERSION;s.sourceInstance = dev.epoch.bridge.Appearance.instance();
     s.x = p.getX();
     s.y = p.getY();
     s.z = p.getZ();
@@ -537,7 +540,7 @@ public class Epoch {
                   state, value -> NbtUtils.writeBlockState(value).toString());
           String beNbt = be == null ? null : be.saveWithFullMetadata().toString();
           if (be instanceof UnknownEntity unknown && !unknown.originalState.isEmpty()) {
-            snbt = unknown.originalState;
+            snbt = unknown.originalState;s.appearanceSources.put(Integer.toString(index), unknown.sourceInstance);
             beNbt = unknown.originalNbt.isEmpty() ? null : unknown.originalNbt;
           }
           if (beNbt != null) s.blockEntities.put(Integer.toString(index), beNbt);
@@ -562,11 +565,11 @@ public class Epoch {
       runs.add(count);
     }
     s.runs = runs.stream().mapToInt(Integer::intValue).toArray();
-    return s;
+    dev.epoch.bridge.Appearance.request(s.palette); return s;
   }
 
   void importWorld(MinecraftServer server, Snapshot s) throws Exception {
-    s.validateColumns();
+    s.validateColumns(); BlockPayloads.project(s, Epoch.VERSION); BlockContext.repairLeaves(s);
     ServerPlayer p = player(server);
     ServerLevel level = server.overworld();
     EnvironmentTransfer.Prepared environment = EnvironmentTransfer.prepare(server,level,p,s);
@@ -649,9 +652,9 @@ public class Epoch {
         if (unknown) {
           unknowns++;
           if (be instanceof UnknownEntity u) {
-            u.originalState = s.palette.get(id);
-            u.originalNbt = payload == null ? "" : payload;
-            u.sourceVersion = s.version;
+            u.originalState = s.originalState(index);
+            u.originalNbt = s.originalPayload(index);
+            u.sourceVersion = s.version;u.sourceInstance = s.appearanceSource(index);
             u.setChanged();
           }
         }
@@ -827,7 +830,7 @@ public class Epoch {
 
   public static class UnknownBlock extends BaseEntityBlock {
     UnknownBlock() {
-      super(BlockBehaviour.Properties.of(net.minecraft.world.level.material.Material.STONE).strength(2));
+      super(BlockBehaviour.Properties.of(net.minecraft.world.level.material.Material.STONE).strength(2).noOcclusion());
     }
 
     @Override
@@ -837,7 +840,7 @@ public class Epoch {
 
     @Override
     public RenderShape getRenderShape(BlockState s) {
-      return RenderShape.MODEL;
+      return RenderShape.ENTITYBLOCK_ANIMATED;
     }
 
     @Override
@@ -852,7 +855,7 @@ public class Epoch {
   }
 
   public static class UnknownEntity extends BlockEntity {
-    String originalState = "", originalNbt = "", sourceVersion = "";
+    String originalState = "", originalNbt = "", sourceVersion = "", sourceInstance = "";
 
     public UnknownEntity(BlockPos p, BlockState s) {
       super(UNKNOWN_ENTITY.get(), p, s);
@@ -863,7 +866,7 @@ public class Epoch {
       super.saveAdditional(tag);
       tag.putString("OriginalState", originalState);
       tag.putString("OriginalNbt", originalNbt);
-      tag.putString("SourceVersion", sourceVersion);
+      tag.putString("SourceVersion",sourceVersion);tag.putString("SourceInstance",sourceInstance);
     }
 
     @Override
@@ -881,7 +884,7 @@ public class Epoch {
       super.load(tag);
       originalState = tag.getString("OriginalState");
       originalNbt = tag.getString("OriginalNbt");
-      sourceVersion = tag.getString("SourceVersion");
+      sourceVersion=tag.getString("SourceVersion");sourceInstance=tag.getString("SourceInstance");
     }
   }
 }

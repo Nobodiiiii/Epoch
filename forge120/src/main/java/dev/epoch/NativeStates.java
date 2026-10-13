@@ -18,11 +18,23 @@ final class NativeStates {
         return versions;
     }
 
-    static Context context() throws Exception {
-        return new Context(CompatibilityRules.load(CompatibilityRules.directory()), mods());
+    private static Context cachedContext;
+    static synchronized Context context() throws Exception {
+        CompatibilityRules rules = CompatibilityRules.load(CompatibilityRules.directory());
+        Map<String,String> installed = mods();
+        if (cachedContext == null || !cachedContext.rules.fingerprint.equals(rules.fingerprint) || !cachedContext.mods.equals(installed))
+            cachedContext = new Context(rules, installed);
+        return cachedContext;
     }
 
     static final class Context implements CompatibilityRules.SchemaLookup {
+        private final Map<String,Decoded> decoded = new LinkedHashMap<String,Decoded>(256,.75f,true) {
+            protected boolean removeEldestEntry(Map.Entry<String,Decoded> entry) { return size() > 4096; }
+        };
+        private static final class Decoded {
+            final BlockState state; final BlockStateCompatibility.Result result; final String name;
+            Decoded(BlockState state, BlockStateCompatibility.Result result, String name) { this.state=state; this.result=result; this.name=name; }
+        }
         final CompatibilityRules rules;
         final Map<String, String> mods;
         final Map<String, Map<String, Set<String>>> schemas = new HashMap<>();
@@ -44,7 +56,10 @@ final class NativeStates {
             return schema;
         }
         BlockStateCompatibility.Result resolve(String text) throws Exception {
+            text = BlockSemantics.normalize(text);
             CompoundTag tag = TagParser.parseTag(text);
+            if(tag.contains("EpochContextRequired"))return BlockStateCompatibility.unresolved(tag.getString("Name"),"missing_context");
+            if(tag.contains("EpochMigrationFailure"))return BlockStateCompatibility.unresolved(tag.getString("Name"),"payload_not_equivalent");
             Map<String, String> props = new TreeMap<>();
             CompoundTag properties = tag.getCompound("Properties");
             for (String key : properties.getAllKeys()) props.put(key, properties.getString(key));
@@ -61,11 +76,17 @@ final class NativeStates {
             }
             return state;
         }
-        BlockState decode(String text, BlockStateCompatibility.Report report, int index) throws Exception {
-            BlockStateCompatibility.Result result = resolve(text);
-            report.record(index, TagParser.parseTag(text).getString("Name"), result);
-            return materialize(result);
+        synchronized BlockState decode(String text, BlockStateCompatibility.Report report, int index) throws Exception {
+            Decoded value = decoded.get(text);
+            if (value == null) {
+                BlockStateCompatibility.Result result = resolve(text);
+                value = new Decoded(materialize(result), result, TagParser.parseTag(text).getString("Name"));
+                decoded.put(text, value);
+            }
+            report.record(index, value.name, value.result);
+            return value.state;
         }
+
         Map<String, Object> audit(RegistryCatalog source) throws Exception {
             return RegistryCatalog.audit(source, Epoch.VERSION, mods, rules.fingerprint, text -> {
                 BlockStateCompatibility.Result result = resolve(text);

@@ -377,11 +377,45 @@ public final class ChunkStoreTest {
         check(ChunkOrigins.read(bindingFile,-10000,-10000,10000,10000).limited,"Zoomed-out scan was unbounded");
     }
 
+    private static void cache(Path root) throws Exception {
+        ChunkStore store = new ChunkStore(root, UUID.randomUUID().toString());
+        ChunkStore.Lease lease = store.transfer(0, "cache-test");
+        ChunkSnapshot original = chunk(2, -3, "stone");
+        original.appearanceSources.put("1", "original-instance");
+        long revision = store.commit(lease, writes(0, original));
+        ChunkKey key = original.key();
+        ChunkSnapshot first = store.read(key).chunk;
+        first.palette.set(0, "air"); first.runs[1] = 1;
+        first.biomes.palette.set(0, "minecraft:desert"); first.biomes.runs[1] = 1;
+        first.appearanceSources.clear(); first.blockEntities.put("1", "bad");
+        ChunkSnapshot second = store.read(key).chunk;
+        check(second.palette.get(0).equals("stone") && second.runs[1] == 65536, "Cache leaked caller array/list mutation");
+        check(second.biomes.palette.get(0).equals("minecraft:plains") && second.biomes.runs[1] == 16384, "Cache leaked biome mutation");
+        check(second.blockEntities.isEmpty() && second.appearanceSources.size() == 1, "Cache leaked map mutation");
+        check(((Number)store.diagnostics().get("decodedCacheHits")).longValue() > 0, "Repeated reads did not reuse decoded content");
+        check(store.revision(key) == revision, "Metadata revision differs from snapshot");
+        check(ProjectionCache.reusable("world", "world", revision, revision, "rules", "rules"), "Clean native cache rejected");
+        check(!ProjectionCache.reusable("world", "other", revision, revision, "rules", "rules"), "Cross-world cache accepted");
+        check(!ProjectionCache.reusable("world", "world", revision, revision + 1, "rules", "rules"), "Stale cache accepted");
+        check(!ProjectionCache.reusable("world", "world", revision, revision, null, "rules"), "Dirty cache accepted");
+        check(!ProjectionCache.reusable("world", "world", revision, revision, "old-rules", "new-rules"), "Rule change did not invalidate cache");
+        Path object;
+        try (java.util.stream.Stream<Path> objects = Files.walk(root.resolve("objects"))) {
+            object = objects.filter(Files::isRegularFile).findFirst().get();
+        }
+        java.nio.file.attribute.FileTime time = Files.getLastModifiedTime(object);
+        byte[] bytes = Files.readAllBytes(object); bytes[bytes.length / 2] ^= 1;
+        Files.write(object, bytes); Files.setLastModifiedTime(object, time);
+        rejects(() -> store.read(key), "cached object corrupted without changing size or timestamp");
+        rejects(() -> store.revision(key), "native cache bypassed corrupt authority object");
+    }
+
     public static void main(String[] args) throws Exception {
         Path root = Files.createTempDirectory("epoch-chunk-store-tests-");
         try {
             coordinates(); columns(); binding(root.resolve("binding")); checkpoint(root.resolve("checkpoint")); sourceRequests(root.resolve("requests"));
             origins(root.resolve("origins"));
+            cache(root.resolve("cache"));
             migration(); authority(root.resolve("authority")); writeQueue(root.resolve("queue"));
             concurrentRead(root.resolve("concurrent-read"));
             selectedFlush(root.resolve("selected-flush"));

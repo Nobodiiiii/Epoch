@@ -38,3 +38,14 @@ tasks.named('check') { dependsOn 'environmentTest' }
 
 // Optional API, downloaded/verified by scripts/install_journeymap.py --download-only.
 dependencies { compileOnly files('../build/journeymap/journeymap-1.18.2-5.9.8-forge.jar') }
+
+// Run the same handoff ordering contract against this adapter's native queues and storage.
+sourceSets.test.java.srcDir '../tests/fence'
+tasks.register('handoffFenceTest', JavaExec) {
+ dependsOn 'testClasses'
+ classpath = sourceSets.test.runtimeClasspath
+ mainClass = 'dev.epoch.HandoffFenceTest'
+ javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
+ workingDir = layout.buildDirectory
+}
+tasks.named('check') { dependsOn 'handoffFenceTest' }

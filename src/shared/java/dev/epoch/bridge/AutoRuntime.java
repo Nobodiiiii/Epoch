@@ -13,6 +13,24 @@ public final class AutoRuntime {
     public static final class Instance {
         public String id="",label="",version="",forgeVersion="",gameDir="",reason="";
         public boolean supported,current;
+        public String warmupPhase="",warmupError="";
+        public boolean warmupAvailable;
+        public boolean canWarmup(){return supported&&!current&&warmupAvailable&&(warmupPhase.isEmpty()||warmupPhase.equals("FAILED"));}
+        public String warmupLabel(){
+            if(current)return "当前版本";
+            if(!supported)return "不可用";
+            if(warmupPhase.equals("READY"))return "已预热";
+            if(warmupPhase.equals("FAILED"))return "重试预热";
+            return warmupPhase.isEmpty()?"预热":"预热中…";
+        }
+        public String detail(){
+            if(current)return "You are playing this instance";
+            if(!supported)return reason==null?"Unavailable":reason;
+            if(warmupPhase.equals("FAILED"))return "预热失败："+warmupError;
+            if(warmupPhase.equals("READY"))return "已预热，点击版本即可切换";
+            if(!warmupPhase.isEmpty())return "正在后台预热，可继续预热其他版本";
+            return "点击版本切换，或点击预热在后台准备";
+        }
     }
     private static final Gson GSON=new GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create();
     private static Path project,control,seedFile;
@@ -112,10 +130,26 @@ public final class AutoRuntime {
         try{
             if(project==null)project=findProject(gameDir);
             JsonObject catalog=catalog();
+            JsonObject host=null;
+            try{JsonObject latest=read(project.resolve(".minecraft/epoch/host-status.json"));if(sameSession(latest)&&freshStatus(latest))host=latest;}catch(Exception ignored){}
             List<Instance> result=new ArrayList<Instance>();
             for(JsonElement element:catalog.getAsJsonArray("instances")){
                 Instance item=GSON.fromJson(element,Instance.class);
                 item.current=item.id.equals(System.getProperty("epoch.instanceId",instanceId==null?"":instanceId));
+                if(host!=null){
+                    String phase=host.get("phase").getAsString();
+                    item.warmupAvailable=phase.equals("READY")||phase.equals("PREPARING");
+                    if(host.has("warmups")&&host.getAsJsonObject("warmups").has(item.id)){
+                        JsonObject warmup=host.getAsJsonObject("warmups").getAsJsonObject(item.id);
+                        item.warmupPhase=warmup.get("phase").getAsString();
+                        item.warmupError=warmup.has("error")?warmup.get("error").getAsString():"";
+                    }
+                    if(host.has("managedProcesses")&&host.getAsJsonObject("managedProcesses").has(item.id)){
+                        item.supported=true;item.reason="";
+                    }
+                    if(!item.current&&host.has("rootInstanceId")&&item.id.equals(host.get("rootInstanceId").getAsString()))item.warmupPhase="READY";
+                    if(item.id.matches("[A-Za-z0-9_-][A-Za-z0-9._-]*")&&Files.exists(warmupRequest(item.id))){item.warmupPhase="QUEUED";item.warmupError="";}
+                }
                 result.add(item);
             }
             cached=Collections.unmodifiableList(result);
@@ -138,7 +172,7 @@ public final class AutoRuntime {
                 if(status.has("error")&&!status.get("error").getAsString().isEmpty())return "切换失败："+status.get("error").getAsString();
                 if(phase.equals("PREPARING"))return "正在准备目标实例，首次启动需要较长时间…";
                 if(phase.equals("SWITCHING"))return "正在交接世界…";
-                if(phase.equals("READY"))return "选择目标实例；首次使用会自动安装对应 Epoch 模组。";
+                if(phase.equals("READY"))return "点击版本切换，或并行预热多个版本；预热不会切换当前版本。";
             }
         }catch(Exception ignored){}
         return message;
@@ -167,6 +201,21 @@ public final class AutoRuntime {
             JsonObject request=new JsonObject();request.addProperty("id",UUID.randomUUID().toString());request.addProperty("sessionId",activeSession());request.addProperty("version",version);request.addProperty("targetId",targetId);
             write(control.resolve("request.json"),request);message="已选择 "+target.label+"，正在准备…";
         }catch(Exception error){message="无法切换："+error.getMessage();throw new IllegalStateException(message,error);}
+    }
+    private static Path warmupRequest(String targetId){return project.resolve(".minecraft/epoch/warmup-requests").resolve(activeSession()+"-"+targetId+".json");}
+    public static synchronized void warmup(Path gameDir,String version,String targetId){
+        try{
+            controlDirectory(gameDir,version);catalog();
+            JsonObject host=read(project.resolve(".minecraft/epoch/host-status.json"));
+            if(!sameSession(host)||!freshStatus(host))throw new IllegalStateException("当前窗口尚未连接或宿主已离线");
+            String phase=host.get("phase").getAsString();
+            if(!phase.equals("READY")&&!phase.equals("PREPARING"))throw new IllegalStateException("正在交接世界，请稍候");
+            Instance target=null;for(Instance item:instances(gameDir))if(item.id.equals(targetId))target=item;
+            if(target==null||!target.supported||target.current||!targetId.matches("[A-Za-z0-9_-][A-Za-z0-9._-]*"))throw new IllegalArgumentException("该实例当前不可预热");
+            if(!target.canWarmup())return;
+            JsonObject request=new JsonObject();request.addProperty("id",UUID.randomUUID().toString());request.addProperty("action","warmup");request.addProperty("sessionId",activeSession());request.addProperty("targetId",targetId);
+            write(warmupRequest(targetId),request);message="正在后台预热 "+target.label;
+        }catch(Exception error){message="无法预热："+error.getMessage();throw new IllegalStateException(message,error);}
     }
     private static void write(Path path,JsonObject value)throws IOException{
         Files.createDirectories(path.getParent());Path temp=Files.createTempFile(path.getParent(),"epoch-auto-",".tmp");

@@ -7,7 +7,7 @@ final class LegacyRegistry {
  static RegistryCatalog catalog(Map<String,String> mods)throws Exception{
   RegistryCatalog out=new RegistryCatalog(Epoch.VERSION,mods);Set<String> seen=new HashSet<String>();
   for(Object value:Block.blockRegistry){Block block=(Block)value;for(int meta=0;meta<16;meta++){
-   String snbt=LegacyStates.encode(block,meta);if(seen.add(snbt))out.states.add(new RegistryCatalog.State(LegacyNbt.string(LegacyNbt.map(LegacyNbt.parse(snbt)).get("Name")),snbt,block.hasTileEntity(meta)));
+   String snbt=LegacyStates.encode(block,meta);out.states.add(new RegistryCatalog.State(LegacyNbt.string(LegacyNbt.map(LegacyNbt.parse(snbt)).get("Name")),snbt,block.hasTileEntity(meta)).nativeSource(String.valueOf(Block.blockRegistry.getNameForObject(block))+"[meta="+meta+"]","raw_metadata_not_all_reachable"));
   }}
   Collections.sort(out.states,new Comparator<RegistryCatalog.State>(){public int compare(RegistryCatalog.State a,RegistryCatalog.State b){int n=a.block.compareTo(b.block);return n==0?a.snbt.compareTo(b.snbt):n;}});return out;
  }

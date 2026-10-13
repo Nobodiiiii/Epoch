@@ -41,12 +41,13 @@ public final class ClientHooks {
  static void catalog(){Minecraft mc=Minecraft.getMinecraft();bridge().diagnostics.put("instances",AutoRuntime.instances(mc.mcDataDir.toPath()));bridge().diagnostics.put("runtimeStatus",AutoRuntime.statusText(mc.mcDataDir.toPath()));bridge().diagnostics.put("listScreenOpen",mc.currentScreen instanceof VersionListScreen);}
  static void useKey(String id){execute(()->{try{Minecraft mc=Minecraft.getMinecraft();int slot=-1;for(int n=0;n<9;n++)if(mc.thePlayer.inventory.getStackInSlot(n)!=null&&mc.thePlayer.inventory.getStackInSlot(n).getItem()==Epoch.KEY){slot=n;break;}if(slot<0)throw new IllegalStateException("Epoch Key missing from hotbar");mc.thePlayer.inventory.currentItem=slot;Epoch.KEY.onItemRightClick(mc.thePlayer.getHeldItem(),mc.theWorld,mc.thePlayer);}catch(Exception e){bridge().status(id,"ERROR",e.toString());}});}
  @SubscribeEvent public void render(TickEvent.RenderTickEvent event){
+  if(event.phase==TickEvent.Phase.START)AppearanceClient.tick();
   Minecraft mc=Minecraft.getMinecraft();if(event.phase==TickEvent.Phase.START){if(listCloseFrames>0)flushMouse(mc);lockPose(mc);return;}
   if(listCloseFrames>0){flushMouse(mc);lockPose(mc);if(--listCloseFrames==0)listClosePose=null;}
   CompletableFuture<double[]> done=capture;if(done!=null){capture=null;try{double[] pose=pose(mc);java.io.File dir=AutoRuntime.controlDirectory(mc.mcDataDir.toPath(),Epoch.VERSION).toFile();net.minecraft.util.ScreenShotHelper.saveScreenshot(dir,"frozen.png",mc.displayWidth,mc.displayHeight,mc.getFramebuffer());java.nio.file.Path generated=dir.toPath().resolve("screenshots/frozen.png");if(java.nio.file.Files.exists(generated))java.nio.file.Files.move(generated,dir.toPath().resolve("frozen.png"),java.nio.file.StandardCopyOption.REPLACE_EXISTING);applyFreeze(pose);done.complete(pose);}catch(Exception e){done.completeExceptionally(e);}}
   int received=mc.theWorld!=null&&mc.thePlayer!=null?ClientTerrain.receivedNearby(mc.theWorld.getChunkProvider(),mc.thePlayer.posX,mc.thePlayer.posZ):0;
   bridge().diagnostics.put("clientReceivedNearbyChunks",received);
-  bridge().windowHandle=hwnd();boolean terrainReady=received==9&&(mc.currentScreen==null||mc.currentScreen instanceof FreezeScreen)&&++frames>20&&mc.renderGlobal.updateRenderers(mc.thePlayer,false);bridge().clientReady=terrainReady&&terrainReadyLastFrame;terrainReadyLastFrame=terrainReady;
+  bridge().windowHandle=hwnd();boolean terrainReady=AppearanceClient.packedReady&&received==9&&(mc.currentScreen==null||mc.currentScreen instanceof FreezeScreen)&&++frames>20&&mc.renderGlobal.updateRenderers(mc.thePlayer,false);bridge().clientReady=terrainReady&&terrainReadyLastFrame;terrainReadyLastFrame=terrainReady;
  }
  @SubscribeEvent public void tick(TickEvent.ClientTickEvent event){
   Minecraft mc=Minecraft.getMinecraft();lockPose(mc);if(event.phase!=TickEvent.Phase.END)return;

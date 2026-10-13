@@ -31,10 +31,11 @@ public final class Epoch {
    return new ActionResult<ItemStack>(EnumActionResult.SUCCESS,player.getHeldItem(hand));
   }
  }.setRegistryName("epoch","phase_key").setTranslationKey("epoch.phase_key").setMaxStackSize(1).setCreativeTab(CreativeTabs.TOOLS);
- @Mod.EventHandler public void preInit(FMLPreInitializationEvent event){DestinationLoader.register(this);MinecraftForge.EVENT_BUS.register(this);MinecraftForge.EVENT_BUS.register(new Handoff());MinecraftForge.EVENT_BUS.register(new StreamingWorld());MinecraftForge.EVENT_BUS.register(new ClientHooks());GameRegistry.registerTileEntity(UnknownTile.class,new ResourceLocation("epoch","unknown_block"));}
+ @Mod.EventHandler public void preInit(FMLPreInitializationEvent event){HandoffFence.register();DestinationLoader.register(this);MinecraftForge.EVENT_BUS.register(this);MinecraftForge.EVENT_BUS.register(new Handoff());MinecraftForge.EVENT_BUS.register(new StreamingWorld());MinecraftForge.EVENT_BUS.register(new ClientHooks());GameRegistry.registerTileEntity(UnknownTile.class,new ResourceLocation("epoch","unknown_block"));}
  @SubscribeEvent public void blocks(RegistryEvent.Register<Block> event){event.getRegistry().register(UNKNOWN);}
  @SubscribeEvent public void items(RegistryEvent.Register<Item> event){event.getRegistry().register(KEY);event.getRegistry().register(UNAVAILABLE_ITEM);event.getRegistry().register(new ItemBlock(UNKNOWN).setRegistryName(UNKNOWN.getRegistryName()));}
  @SubscribeEvent public void models(net.minecraftforge.client.event.ModelRegistryEvent event){ModelLoader.setCustomModelResourceLocation(UNAVAILABLE_ITEM,0,new ModelResourceLocation("epoch:unavailable_item","inventory"));ModelLoader.setCustomModelResourceLocation(KEY,0,new ModelResourceLocation("epoch:phase_key","inventory"));ModelLoader.setCustomModelResourceLocation(Item.getItemFromBlock(UNKNOWN),0,new ModelResourceLocation("epoch:unknown_block","inventory"));}
+ @Mod.EventHandler public void init(FMLInitializationEvent event){AppearanceClient.init();}
  @Mod.EventHandler public void starting(FMLServerStartingEvent event){event.registerServerCommand(new net.minecraft.command.CommandBase(){
   public String getName(){return "epoch";}
   public String getUsage(net.minecraft.command.ICommandSender sender){return "/epoch versions | travel x y z | travel cancel";}
@@ -54,6 +55,9 @@ public final class Epoch {
  @Mod.EventHandler public void stopped(FMLServerStoppedEvent event){StreamingWorld.stopped();}
  public static class UnknownBlock extends Block {
   UnknownBlock(){super(Material.ROCK);setHardness(1.5f);setResistance(6f);setCreativeTab(CreativeTabs.BUILDING_BLOCKS);}
+  public EnumBlockRenderType getRenderType(IBlockState state){return EnumBlockRenderType.ENTITYBLOCK_ANIMATED;}
+  public boolean isOpaqueCube(IBlockState state){return false;}
+  public boolean isFullCube(IBlockState state){return false;}
   public boolean hasTileEntity(IBlockState state){return true;}
   public TileEntity createTileEntity(World world,IBlockState state){return new UnknownTile();}
   private ItemStack preserved(net.minecraft.world.IBlockAccess world,net.minecraft.util.math.BlockPos pos){ItemStack stack=new ItemStack(this);TileEntity tile=world.getTileEntity(pos);if(tile instanceof UnknownTile){NBTTagCompound data=((UnknownTile)tile).writeToNBT(new NBTTagCompound());data.removeTag("x");data.removeTag("y");data.removeTag("z");NBTTagCompound tag=new NBTTagCompound();tag.setTag("BlockEntityTag",data);stack.setTagCompound(tag);}return stack;}
@@ -61,12 +65,14 @@ public final class Epoch {
   public ItemStack getPickBlock(IBlockState state,net.minecraft.util.math.RayTraceResult target,World world,net.minecraft.util.math.BlockPos pos,EntityPlayer player){return preserved(world,pos);}
   public boolean removedByPlayer(IBlockState state,World world,net.minecraft.util.math.BlockPos pos,EntityPlayer player,boolean willHarvest){return willHarvest||super.removedByPlayer(state,world,pos,player,willHarvest);}
   public void harvestBlock(World world,EntityPlayer player,net.minecraft.util.math.BlockPos pos,IBlockState state,TileEntity tile,ItemStack tool){super.harvestBlock(world,player,pos,state,tile,tool);world.setBlockToAir(pos);}
-  public void onBlockPlacedBy(World world,net.minecraft.util.math.BlockPos pos,IBlockState state,net.minecraft.entity.EntityLivingBase placer,ItemStack stack){super.onBlockPlacedBy(world,pos,state,placer,stack);TileEntity tile=world.getTileEntity(pos);if(tile instanceof UnknownTile&&stack.hasTagCompound()&&stack.getTagCompound().hasKey("BlockEntityTag",10)){NBTTagCompound data=stack.getTagCompound().getCompoundTag("BlockEntityTag");UnknownTile unknown=(UnknownTile)tile;unknown.originalState=data.getString("OriginalState");unknown.originalNbt=data.getString("OriginalNbt");unknown.sourceVersion=data.getString("SourceVersion");unknown.markDirty();world.notifyBlockUpdate(pos,state,state,3);}}
+  public void onBlockPlacedBy(World world,net.minecraft.util.math.BlockPos pos,IBlockState state,net.minecraft.entity.EntityLivingBase placer,ItemStack stack){super.onBlockPlacedBy(world,pos,state,placer,stack);TileEntity tile=world.getTileEntity(pos);if(tile instanceof UnknownTile&&stack.hasTagCompound()&&stack.getTagCompound().hasKey("BlockEntityTag",10)){NBTTagCompound data=stack.getTagCompound().getCompoundTag("BlockEntityTag");UnknownTile unknown=(UnknownTile)tile;unknown.originalState=data.getString("OriginalState");unknown.originalNbt=data.getString("OriginalNbt");unknown.sourceVersion=data.getString("SourceVersion");unknown.sourceInstance=data.getString("SourceInstance");unknown.markDirty();world.notifyBlockUpdate(pos,state,state,3);}}
  }
  public static class UnknownTile extends TileEntity {
-  public String originalState="",originalNbt="",sourceVersion="";
-  public NBTTagCompound writeToNBT(NBTTagCompound tag){super.writeToNBT(tag);tag.setString("OriginalState",originalState);tag.setString("OriginalNbt",originalNbt);tag.setString("SourceVersion",sourceVersion);return tag;}
-  public void readFromNBT(NBTTagCompound tag){super.readFromNBT(tag);originalState=tag.getString("OriginalState");originalNbt=tag.getString("OriginalNbt");sourceVersion=tag.getString("SourceVersion");}
+  public String originalState="",originalNbt="",sourceVersion="",sourceInstance="";
+  public NBTTagCompound writeToNBT(NBTTagCompound tag){super.writeToNBT(tag);tag.setString("OriginalState",originalState);tag.setString("OriginalNbt",originalNbt);tag.setString("SourceVersion",sourceVersion);tag.setString("SourceInstance",sourceInstance);return tag;}
+  public void readFromNBT(NBTTagCompound tag){super.readFromNBT(tag);originalState=tag.getString("OriginalState");originalNbt=tag.getString("OriginalNbt");sourceVersion=tag.getString("SourceVersion");sourceInstance=tag.getString("SourceInstance");}
+  public net.minecraft.network.play.server.SPacketUpdateTileEntity getUpdatePacket(){return new net.minecraft.network.play.server.SPacketUpdateTileEntity(pos,0,getUpdateTag());}
+  public void onDataPacket(net.minecraft.network.NetworkManager manager,net.minecraft.network.play.server.SPacketUpdateTileEntity packet){readFromNBT(packet.getNbtCompound());}
   public NBTTagCompound getUpdateTag(){return writeToNBT(new NBTTagCompound());}
  }
 }

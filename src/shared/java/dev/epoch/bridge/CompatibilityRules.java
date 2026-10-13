@@ -32,6 +32,7 @@ public final class CompatibilityRules {
         "when", "targetMods", "drop", "rename", "values", "add", "toBlock"));
     private final List<Rule> rules;
     public final String fingerprint;
+    private static final Map<String,CompatibilityRules> LOADED = new LinkedHashMap<String,CompatibilityRules>();
 
     private CompatibilityRules(List<Rule> input) throws IOException {
         List<Rule> copy = new ArrayList<Rule>();
@@ -86,6 +87,46 @@ public final class CompatibilityRules {
     }
 
     public static CompatibilityRules load(Path directory) throws IOException {
+        // Providers may compute rules dynamically. Cache file-only packs by their actual bytes,
+        // not timestamps, so editing a pack always invalidates state and projection caches.
+        try {
+            if (!ServiceLoader.load(BlockCompatibilityProvider.class).iterator().hasNext()) {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                if (Files.exists(directory) && !Files.isDirectory(directory)) throw new IOException("Invalid compatibility directory");
+                List<Path> files = new ArrayList<Path>();
+                if (Files.isDirectory(directory)) try (DirectoryStream<Path> paths = Files.newDirectoryStream(directory, "*.json")) {
+                    for (Path file : paths) files.add(file);
+                }
+                Collections.sort(files);
+                if (files.size() > 256) throw new IOException("Too many compatibility packs");
+                List<byte[]> contents = new ArrayList<byte[]>();
+                for (Path file : files) {
+                    if (Files.size(file) > 1024 * 1024) throw new IOException("Compatibility pack exceeds 1 MiB: " + file);
+                    digest.update(file.getFileName().toString().getBytes(StandardCharsets.UTF_8));
+                    byte[] bytes = Files.readAllBytes(file);
+                    if (bytes.length > 1024 * 1024) throw new IOException("Compatibility pack grew beyond 1 MiB: " + file);
+                    contents.add(bytes); digest.update(bytes);
+                }
+                String key = directory.toAbsolutePath().normalize() + ":" + Arrays.toString(digest.digest());
+                synchronized (LOADED) {
+                    CompatibilityRules found = LOADED.get(key); if (found != null) return found;
+                    List<Rule> rules = new ArrayList<Rule>(builtins().rules);
+                    for (int n = 0; n < contents.size(); n++) {
+                        try { rules.addAll(parse(new StringReader(new String(contents.get(n), StandardCharsets.UTF_8)))); }
+                        catch (Exception error) { throw new IOException("Invalid compatibility pack " + files.get(n) + ": " + error.getMessage(), error); }
+                    }
+                    if (rules.size() > 10000) throw new IOException("Too many compatibility rules");
+                    CompatibilityRules loaded = new CompatibilityRules(rules);
+                    if (LOADED.size() >= 4) LOADED.clear();
+                    LOADED.put(key, loaded); return loaded;
+                }
+            }
+        } catch (java.security.NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
+        catch (ServiceConfigurationError error) { throw new IOException("Cannot load block compatibility provider", error); }
+        return loadUncached(directory);
+    }
+
+    private static CompatibilityRules loadUncached(Path directory) throws IOException {
         List<Rule> rules = new ArrayList<Rule>(builtins().rules);
         if (Files.exists(directory)) {
             if (!Files.isDirectory(directory)) throw new IOException("Compatibility pack path is not a directory: " + directory);

@@ -28,6 +28,7 @@ final class TerrainTransfer {
 
     static final class Prepared {
         final ChunkSnapshot source;
+        PackedBlocks packed = PackedBlocks.EMPTY;
         final LegacyStates.State[] cells;
         final Map<ChunkPosition,TileEntity> entities;
         final String[] appliedBiomes;
@@ -43,7 +44,13 @@ final class TerrainTransfer {
     }
 
     static ChunkSnapshot capture(WorldServer world, Chunk chunk, WorldExtras.Carry residual) throws Exception {
-        ChunkSnapshot result=new ChunkSnapshot();result.version=Epoch.VERSION;result.chunkX=chunk.xPosition;result.chunkZ=chunk.zPosition;
+        long started=System.nanoTime();
+        try { return captureMeasured(world, chunk, residual); }
+        finally { TerrainMetrics.record("capture",System.nanoTime()-started); }
+    }
+
+    private static ChunkSnapshot captureMeasured(WorldServer world, Chunk chunk, WorldExtras.Carry residual) throws Exception {
+        ChunkSnapshot result=new ChunkSnapshot();result.version=Epoch.VERSION;result.sourceInstance = dev.epoch.bridge.Appearance.instance();result.chunkX=chunk.xPosition;result.chunkZ=chunk.zPosition;
         Map<Integer,String> states=new HashMap<>();Map<String,Integer> palette=new HashMap<>();List<Integer> runs=new ArrayList<>();
         int previous=-1,count=0;
         for(int index=0;index<ChunkSnapshot.VOLUME;index++){
@@ -59,9 +66,10 @@ final class TerrainTransfer {
             int key=(Block.getIdFromBlock(block)<<4)|meta;String state=states.get(key);
             if(state==null){state=stateName(block,meta);states.put(key,state);}
             TileEntity tile=block.hasTileEntity(meta)?chunk.func_150806_e(x,y,z):null;String payload=null;
-            if(tile instanceof Epoch.UnknownTile&&!((Epoch.UnknownTile)tile).originalState.isEmpty()){
+            if(block==CompactUnknowns.BLOCK){PackedBlocks.Entry packed=CompactUnknowns.require(world,chunk.xPosition*16+x,y,chunk.zPosition*16+z);state=packed.state;result.appearanceSources.put(Integer.toString(index),packed.instance);}
+            else if(tile instanceof Epoch.UnknownTile&&!((Epoch.UnknownTile)tile).originalState.isEmpty()){
                 Epoch.UnknownTile unknown=(Epoch.UnknownTile)tile;
-                state=unknown.originalState;payload=unknown.originalNbt.isEmpty()?null:unknown.originalNbt;}
+                state=unknown.originalState;result.appearanceSources.put(Integer.toString(index), unknown.sourceInstance);payload=unknown.originalNbt.isEmpty()?null:unknown.originalNbt;}
             else if(tile!=null){NBTTagCompound tag=new NBTTagCompound();tile.writeToNBT(tag);LegacyNbt.Tag canonical=LegacyNbt.from(tag);Handoff.convertTile(canonical,true);payload=LegacyNbt.encode(canonical);}
             if(payload!=null)result.blockEntities.put(Integer.toString(index),payload);
             Integer id=palette.get(state);if(id==null){id=palette.size();palette.put(state,id);result.palette.add(state);}
@@ -73,14 +81,25 @@ final class TerrainTransfer {
             String biome=EnvironmentTransfer.biomeName(chunk.getBiomeGenForWorldCoords(x,z,world.getWorldChunkManager()));
             for(int y=0;y<64;y++)biomes[(y*16+z)*16+x]=biome;
         }
-        result.biomes=WorldExtras.Biomes.of(residual==null?biomes:residual.restore(result.blocks(),biomes));result.validate();return result;
+        result.biomes=WorldExtras.Biomes.of(residual==null?biomes:residual.restore(result.blocks(),biomes));LegacyContext.capture(result, world); dev.epoch.bridge.Appearance.request(result.palette); result.validate();return result;
     }
 
     static Prepared prepare(WorldServer world, ChunkSnapshot source) throws Exception {
-        source.validate();Snapshot bounds=source.blocks();LegacyStates.State[] palette=new LegacyStates.State[source.palette.size()];
+        long started=System.nanoTime();
+        try { return prepareMeasured(world, source); }
+        finally { TerrainMetrics.record("prepare",System.nanoTime()-started); }
+    }
+
+    private static Prepared prepareMeasured(WorldServer world, ChunkSnapshot source) throws Exception {
+        source.validate(); source = BlockPayloads.project(source, Epoch.VERSION); source = BlockContext.repairPending(source);Snapshot bounds=source.blocks();LegacyStates.State[] palette=new LegacyStates.State[source.palette.size()];
         for(int n=0;n<palette.length;n++)palette[n]=LegacyStates.decode(source.palette.get(n));
-        LegacyStates.State[] cells=new LegacyStates.State[ChunkSnapshot.VOLUME];Map<ChunkPosition,TileEntity> entities=new HashMap<>();int index=0;
-        for(int r=0;r<source.runs.length;r+=2)for(int n=0;n<source.runs[r+1];n++,index++){
+        LegacyStates.State[] cells=new LegacyStates.State[ChunkSnapshot.VOLUME];Map<ChunkPosition,TileEntity> entities=new HashMap<>();Map<Integer,PackedBlocks.Entry> packed=new TreeMap<>();int index=0;
+        BitSet payloadPositions=new BitSet(ChunkSnapshot.VOLUME);
+        for(String position:source.blockEntities.keySet())payloadPositions.set(Integer.parseInt(position));
+        for(int r=0;r<source.runs.length;r+=2){
+            LegacyStates.State shared=palette[source.runs[r]];int end=index+source.runs[r+1],nextPayload=payloadPositions.nextSetBit(index);
+            if(shared!=null&&!shared.block.hasTileEntity(shared.meta)&&(nextPayload<0||nextPayload>=end)){Arrays.fill(cells,index,end,shared);index=end;continue;}
+            for(int n=0;n<source.runs[r+1];n++,index++){
             int id=source.runs[r],x=bounds.blockX(index),y=bounds.blockY(index),z=bounds.blockZ(index);
             LegacyStates.State state=palette[id];String raw=source.blockEntities.get(Integer.toString(index));TileEntity tile=null;boolean unknown=state==null;
             if(!unknown)try{
@@ -97,17 +116,27 @@ final class TerrainTransfer {
                     if(!LegacyNbt.preserves(expected,roundtrip))throw new IOException("Tile payload would lose data");
                 }
             }catch(Exception incompatible){unknown=true;}
-            if(unknown){state=new LegacyStates.State(Epoch.UNKNOWN,0);Epoch.UnknownTile placeholder=new Epoch.UnknownTile();
-                placeholder.originalState=source.palette.get(id);placeholder.originalNbt=raw==null?"":raw;placeholder.sourceVersion=source.version;tile=placeholder;}
+            if(unknown && PackedBlocks.eligible(source.originalState(index),source.originalPayload(index))){
+                state=new LegacyStates.State(CompactUnknowns.BLOCK,0);tile=null;
+                packed.put(index,new PackedBlocks.Entry(source.originalState(index),source.version,source.appearanceSource(index)));
+            } else if(unknown){state=new LegacyStates.State(Epoch.UNKNOWN,0);Epoch.UnknownTile placeholder=new Epoch.UnknownTile();
+                placeholder.originalState=source.originalState(index);placeholder.originalNbt=source.originalPayload(index);placeholder.sourceVersion=source.version;placeholder.sourceInstance = source.appearanceSource(index);tile=placeholder;}
             cells[index]=state;
             if(tile!=null){tile.xCoord=x;tile.yCoord=y;tile.zCoord=z;entities.put(new ChunkPosition(x,y,z),tile);}
         }
+        }
         Map<String,BiomeGenBase> biomes=EnvironmentTransfer.registry();
         String[] applied=BiomeCompatibility.project(source.biomes.expand(16384),16,64,16,false,biomes.keySet());
-        return new Prepared(source,cells,entities,applied,biomes);
+        Prepared result=new Prepared(source,cells,entities,applied,biomes);result.packed=new PackedBlocks(packed);return result;
     }
 
     static void apply(WorldServer world, Chunk chunk, Prepared prepared) throws Exception {
+        long started=System.nanoTime();
+        try { applyMeasured(world, chunk, prepared); }
+        finally { TerrainMetrics.record("apply",System.nanoTime()-started); }
+    }
+
+    private static void applyMeasured(WorldServer world, Chunk chunk, Prepared prepared) throws Exception {
         if(chunk.xPosition!=prepared.source.chunkX||chunk.zPosition!=prepared.source.chunkZ)throw new IOException("Prepared chunk coordinates differ");
         for(Object value:new ArrayList<Object>(chunk.chunkTileEntityMap.values())){
             TileEntity tile=(TileEntity)value;chunk.removeTileEntity(tile.xCoord&15,tile.yCoord,tile.zCoord&15);tile.invalidate();
@@ -120,6 +149,7 @@ final class TerrainTransfer {
                 LegacyStates.State state=prepared.cells[(y*16+z)*16+x];section.func_150818_a(x,y&15,z,state.block);section.setExtBlockMetadata(x,y&15,z,state.meta);
             }
         }
+        CompactUnknowns.install(chunk,prepared.packed);
         for(TileEntity tile:prepared.entities.values())chunk.addTileEntity(tile);
         byte[] nativeBiomes=chunk.getBiomeArray();for(int n=0;n<256;n++)nativeBiomes[n]=(byte)prepared.biomes.get(prepared.appliedBiomes[n]).biomeID;
         chunk.generateSkylightMap();chunk.isLightPopulated=false;chunk.setChunkModified();

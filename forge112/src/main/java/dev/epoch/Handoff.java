@@ -38,13 +38,13 @@ public final class Handoff {
   }while(frozen&&server.isServerRunning());
  }
  private static java.lang.reflect.Field tasksField;
- private static void drainTasks(MinecraftServer server)throws Exception{
+ static void drainTasks(MinecraftServer server)throws Exception{
   if(tasksField==null){for(String name:new String[]{"futureTaskQueue","field_175589_i"})try{tasksField=MinecraftServer.class.getDeclaredField(name);tasksField.setAccessible(true);break;}catch(NoSuchFieldException ignored){}if(tasksField==null)throw new IllegalStateException("Server task queue unavailable");}
   Queue<?> tasks=(Queue<?>)tasksField.get(server);synchronized(tasks){Object task;while((task=tasks.poll())!=null)((Runnable)task).run();}
  }
  private void handle(MinecraftServer server,BridgeFiles.Command cmd)throws Exception{
   switch(cmd.action){
-   case "export":frozen=true;StreamingWorld.flush(server.getWorld(0));double[] camera=ClientHooks.captureFrozen();Snapshot snapshot=exportWorld(server);snapshot.x=camera[0];snapshot.y=camera[1];snapshot.z=camera[2];snapshot.yaw=(float)camera[3];snapshot.pitch=(float)camera[4];snapshot.write(Paths.get(cmd.path));StreamingWorld.exported(server.getWorld(0),Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"EXPORTED","World snapshot committed; simulation frozen");break;
+   case "export":frozen=true;double[] camera=ClientHooks.captureFrozen();ClientHooks.bridge().diagnostics.put("exportInputWaitMillis",HandoffFence.drain(server,player(server).connection));StreamingWorld.flush(server.getWorld(0));Snapshot snapshot=exportWorld(server);snapshot.x=camera[0];snapshot.y=camera[1];snapshot.z=camera[2];snapshot.yaw=(float)camera[3];snapshot.pitch=(float)camera[4];snapshot.write(Paths.get(cmd.path));StreamingWorld.exported(server.getWorld(0),Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"EXPORTED","World snapshot committed; simulation frozen");break;
    case "import":frozen=true;ClientHooks.freezeCurrent();StreamingWorld.verifyImport(server.getWorld(0),Paths.get(cmd.path));importWorld(server,Snapshot.read(Paths.get(cmd.path)));ClientHooks.markImported(cmd.id);break;
    case "freeze":frozen=true;ClientHooks.freezeCurrent();ClientHooks.bridge().status(cmd.id,"FROZEN","Simulation frozen");break;
    case "resume":StreamingWorld.resume(server.getWorld(0));frozen=false;ClientHooks.resumeAt=System.currentTimeMillis()+400;ClientHooks.bridge().status(cmd.id,"READY","Simulation resumed");break;
@@ -67,16 +67,16 @@ public final class Handoff {
  }
  private EntityPlayerMP player(MinecraftServer server){if(server.getPlayerList().getPlayers().size()!=1)throw new IllegalStateException("Epoch requires exactly one player");EntityPlayerMP p=server.getPlayerList().getPlayers().get(0);if(p.dimension!=0)throw new IllegalStateException("Epoch supports the Overworld only");int limit=StreamingWorld.enabled(server.getWorld(0))?30000000:32;if(p.posX< -limit||p.posX>=limit||p.posZ< -limit||p.posZ>=limit||p.posY<0||p.posY>=256)throw new IllegalStateException("Outside Epoch shared region [-32,32), y [0,256)");return p;}
  Snapshot exportWorld(MinecraftServer server) throws Exception { return exportWorld(server, player(server)); }
- Snapshot exportWorld(MinecraftServer server, EntityPlayerMP p) throws Exception {WorldServer world=server.getWorld(0);Snapshot s=new Snapshot();s.version=Epoch.VERSION;s.x=p.posX;s.y=p.posY;s.z=p.posZ;s.yaw=p.rotationYaw;s.pitch=p.rotationPitch;s.gameTime=world.getTotalWorldTime();s.dayTime=world.getWorldTime();s.inventory=LegacyItems.encodeList(p.inventory.writeToNBT(new NBTTagList())).toString();s.selectedSlot=p.inventory.currentItem;StreamingWorld.configureSnapshot(world,s,p.posX,p.posZ);EnvironmentTransfer.capture(server,world,p,s);
+ Snapshot exportWorld(MinecraftServer server, EntityPlayerMP p) throws Exception {WorldServer world=server.getWorld(0);Snapshot s=new Snapshot();s.version=Epoch.VERSION;s.sourceInstance = dev.epoch.bridge.Appearance.instance();s.x=p.posX;s.y=p.posY;s.z=p.posZ;s.yaw=p.rotationYaw;s.pitch=p.rotationPitch;s.gameTime=world.getTotalWorldTime();s.dayTime=world.getWorldTime();s.inventory=LegacyItems.encodeList(p.inventory.writeToNBT(new NBTTagList())).toString();s.selectedSlot=p.inventory.currentItem;StreamingWorld.configureSnapshot(world,s,p.posX,p.posZ);EnvironmentTransfer.capture(server,world,p,s);
   Map<String,Integer> ids=new HashMap<String,Integer>();Map<IBlockState,String> encoded=new IdentityHashMap<IBlockState,String>();List<Integer> runs=new ArrayList<Integer>();int previous=-1,count=0;
   for(int y=0;y<s.sizeY;y++)for(int z=0;z<s.sizeZ;z++)for(int x=0;x<s.sizeX;x++){
    int index=(y*s.sizeZ+z)*s.sizeX+x;BlockPos pos=new BlockPos(x+s.x0,y+s.y0,z+s.z0);IBlockState state=world.getBlockState(pos);TileEntity be=state.getBlock().hasTileEntity(state)?world.getTileEntity(pos):null;String snbt=encoded.get(state);if(snbt==null){snbt=LegacyStates.encode(state);encoded.put(state,snbt);}String payload=be==null?null:LegacyItems.encodePayload(be.writeToNBT(new NBTTagCompound())).toString();
-   if(be instanceof Epoch.UnknownTile&&!((Epoch.UnknownTile)be).originalState.isEmpty()){Epoch.UnknownTile unknown=(Epoch.UnknownTile)be;snbt=unknown.originalState;payload=unknown.originalNbt.isEmpty()?null:unknown.originalNbt;}
+   if(be instanceof Epoch.UnknownTile&&!((Epoch.UnknownTile)be).originalState.isEmpty()){Epoch.UnknownTile unknown=(Epoch.UnknownTile)be;snbt=unknown.originalState;s.appearanceSources.put(Integer.toString(index), unknown.sourceInstance);payload=unknown.originalNbt.isEmpty()?null:unknown.originalNbt;}
    if(payload!=null)s.blockEntities.put(Integer.toString(index),payload);Integer id=ids.get(snbt);if(id==null){id=s.palette.size();ids.put(snbt,id);s.palette.add(snbt);}if(id==previous)count++;else{if(count>0){runs.add(previous);runs.add(count);}previous=id;count=1;}
-  }if(count>0){runs.add(previous);runs.add(count);}s.runs=new int[runs.size()];for(int n=0;n<runs.size();n++)s.runs[n]=runs.get(n);return s;
+  }if(count>0){runs.add(previous);runs.add(count);}s.runs=new int[runs.size()];for(int n=0;n<runs.size();n++)s.runs[n]=runs.get(n);LegacyContext.capture(s,world); dev.epoch.bridge.Appearance.request(s.palette); return s;
  }
  private void importWorld(MinecraftServer server,Snapshot s)throws Exception{
-  s.validateColumns();
+  s.validateColumns(); BlockPayloads.project(s, Epoch.VERSION); BlockContext.repairPending(s);
   EntityPlayerMP p=player(server);WorldServer world=server.getWorld(0);EnvironmentTransfer.Prepared environment=EnvironmentTransfer.prepare(server,world,p,s);IBlockState[] palette=new IBlockState[s.palette.size()];for(int n=0;n<palette.length;n++)palette[n]=LegacyStates.decode(s.palette.get(n));
   Map<Integer,NBTTagCompound> parsed=new HashMap<Integer,NBTTagCompound>();for(Map.Entry<String,String> entry:s.blockEntities.entrySet())parsed.put(Integer.parseInt(entry.getKey()),Snbt.compound(entry.getValue()));
   NBTTagCompound inventoryTag=Snbt.compound("{Inventory:"+(s.inventory==null||s.inventory.isEmpty()?"[]":s.inventory)+"}");if(inventoryTag.getTag("Inventory").getId()!=9)throw new IllegalArgumentException("Inventory must be a list");NBTTagList inventory=LegacyItems.decodePlayerInventory((NBTTagList)inventoryTag.getTag("Inventory"));
@@ -91,7 +91,7 @@ public final class Handoff {
   for(int r=0;r<s.runs.length;r+=2){int id=s.runs[r];for(int k=0;k<s.runs[r+1];k++,index++){BlockPos pos=position(s,index);IBlockState state=palette[id];boolean unknown=state==null||incompatible.contains(index);IBlockState placed=unknown?Epoch.UNKNOWN.getDefaultState():state;String payload=s.blockEntities.get(Integer.toString(index));
    if(world.getBlockState(pos)!=placed){TileEntity previous=world.getTileEntity(pos);if(previous instanceof IInventory)((IInventory)previous).clear();world.setBlockState(pos,placed,2|16);}
    TileEntity be=null;if(placed.getBlock().hasTileEntity(placed)){be=prepared.get(index);if(unknown||be==null)be=placed.getBlock().createTileEntity(world,placed);if(be==null)throw new IllegalStateException("Tile factory failed at "+pos);world.removeTileEntity(pos);world.setTileEntity(pos,be);}
-   if(unknown){unknowns++;Epoch.UnknownTile tile=(Epoch.UnknownTile)be;tile.originalState=s.palette.get(id);tile.originalNbt=payload==null?"":payload;tile.sourceVersion=s.version;tile.markDirty();}
+   if(unknown){unknowns++;Epoch.UnknownTile tile=(Epoch.UnknownTile)be;tile.originalState=s.originalState(index);tile.originalNbt=s.originalPayload(index);tile.sourceVersion=s.version;tile.sourceInstance = s.appearanceSource(index);tile.markDirty();}
    else if(be!=null){if(payload!=null){NBTTagCompound tag=parsed.get(index).copy();tag.setInteger("x",pos.getX());tag.setInteger("y",pos.getY());tag.setInteger("z",pos.getZ());be.readFromNBT(LegacyItems.decodePayload(tag));}else if(be instanceof IInventory)((IInventory)be).clear();be.markDirty();}
   }}
   // onBlockAdded can rotate a chest while its neighbours are still being imported.

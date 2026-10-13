@@ -27,6 +27,27 @@ public final class ChunkStore {
     private final Path root;
     private final String worldId;
     private final Faults faults;
+    private static final long CACHE_LIMIT = 32L * 1024 * 1024;
+    private final Map<String, Cached> cache = new LinkedHashMap<String, Cached>(16, .75f, true);
+    private long cacheBytes, cacheHits, cacheMisses;
+    private static final class Cached {
+        final byte[] compressed;
+        final ChunkSnapshot snapshot;
+        final long bytes;
+        Cached(byte[] compressed, ChunkSnapshot snapshot) {
+            this.compressed = compressed; this.snapshot = snapshot;
+            this.bytes = 128L + compressed.length + snapshot.retainedBytes();
+        }
+    }
+
+    public Map<String,Object> diagnostics() {
+        synchronized (cache) {
+        Map<String,Object> out = new LinkedHashMap<String,Object>();
+        out.put("decodedCacheHits", cacheHits); out.put("decodedCacheMisses", cacheMisses);
+        out.put("decodedCacheBytes", cacheBytes); out.put("decodedCacheLimit", CACHE_LIMIT);
+        return out;
+        }
+    }
 
     public static final class Lease {
         public final String owner;
@@ -105,6 +126,15 @@ public final class ChunkStore {
         // Future object GC must pin readers before reclaiming any selected old revision.
         faults.at("read-selected");
         return new Versioned(selected.revision, content(key, selected));
+    }
+
+    /** Publication-locked metadata lookup, without decompressing terrain. Zero means absent. */
+    public long revision(ChunkKey key) throws IOException {
+        Ref selected = locked(() -> { state(); return ref(key); });
+        if (selected == null) return 0L;
+        if (!hash(readBytes(object(selected.hash), CONTENT_LIMIT)).equals(selected.hash))
+            throw new IOException("Chunk checksum mismatch: " + key);
+        return selected.revision;
     }
 
     public static void writeChunk(Path file, ChunkSnapshot chunk) throws IOException {
@@ -253,11 +283,32 @@ public final class ChunkStore {
     private ChunkSnapshot content(ChunkKey key, Ref ref) throws IOException {
         validate(ref);
         byte[] compressed = readBytes(object(ref.hash), CONTENT_LIMIT);
+        // Compare actual bytes on every read: external corruption must not be hidden by a cache,
+        // including same-size writes with preserved file timestamps.
+        synchronized (cache) {
+            Cached found = cache.get(ref.hash);
+            if (found != null && Arrays.equals(found.compressed, compressed)) {
+                if (!found.snapshot.key().equals(key)) throw new IOException("Chunk content coordinate mismatch");
+                cacheHits++; return found.snapshot.copy();
+            }
+        }
         if (!hash(compressed).equals(ref.hash)) throw new IOException("Chunk checksum mismatch: " + key);
         byte[] raw;
         try (InputStream input = new GZIPInputStream(new ByteArrayInputStream(compressed))) { raw = bounded(input, CONTENT_LIMIT); }
         ChunkSnapshot chunk = decode(raw, ChunkSnapshot.class); chunk.validate();
         if (!chunk.key().equals(key)) throw new IOException("Chunk content coordinate mismatch");
+        synchronized (cache) {
+            cacheMisses++;
+            Cached entry = new Cached(compressed, chunk);
+            if (entry.bytes <= CACHE_LIMIT) {
+                Cached previous = cache.put(ref.hash, entry);
+                if (previous != null) cacheBytes -= previous.bytes;
+                cacheBytes += entry.bytes;
+                Iterator<Cached> values = cache.values().iterator();
+                while (cacheBytes > CACHE_LIMIT && values.hasNext()) { cacheBytes -= values.next().bytes; values.remove(); }
+                return chunk.copy();
+            }
+        }
         return chunk;
     }
     private static byte[] encode(Object value) { return JSON.toJson(value).getBytes(StandardCharsets.UTF_8); }
@@ -288,7 +339,7 @@ public final class ChunkStore {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
             StringBuilder out = new StringBuilder(64);
-            for (byte value : digest) out.append(String.format(Locale.ROOT, "%02x", value & 255));
+            for (byte value : digest) { out.append("0123456789abcdef".charAt((value >>> 4) & 15)); out.append("0123456789abcdef".charAt(value & 15)); }
             return out.toString();
         } catch (NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
     }

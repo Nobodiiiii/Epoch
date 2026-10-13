@@ -18,6 +18,8 @@ def extract(source):
         # Mojang's table contains sentinel entries (e.g. skulls need their tile
         # data). They are not real IDs; let adapters retain raw legacy metadata.
         if not re.fullmatch(r'[a-z0-9_.-]+:[a-z0-9_./-]+',state['Name']):continue
+        # Flower-pot contents are stored in tile NBT; numeric metadata cannot identify a plant.
+        if int(raw) >> 4 == 140: state={'Name':'minecraft:flower_pot'}
         result[raw]=state
     if len(result)<1000 or result.get('32',{}).get('Name')!='minecraft:grass_block':
         raise ValueError('Unexpected BlockStateData format; refusing partial map')
