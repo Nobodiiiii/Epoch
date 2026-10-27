@@ -13,10 +13,6 @@ The launcher explicitly passes the DLL's absolute path in `org.lwjgl.glfw.libnam
 
 ## Adopted-window targets (v0.2)
 
-`build.ps1 -ChildStartup` produces **`epoch-glfw-child.dll`** and `export-verification-child.json`, preserving the previous `epoch-glfw.dll` (which may still be loaded by a running legacy test). The host selects this variant for owned adopted-mode targets and sets `EPOCH_HIDDEN_START=1` in those child processes only. With that variable set, patched GLFW suppresses showing, restoring, attention and focus while its native window is not yet a parented `WS_CHILD`. This prevents a second top-level loading window and startup focus stealing. The host can show it normally after verified attachment and import readiness. Target options must disable exclusive fullscreen. An original user-launched instance retains its existing stock GLFW and original top-level HWND.
-
-The complete `epoch-glfw.patch` includes both the earlier cross-process focus fix and this environment-gated startup change. It was checked against the clean pinned source. The child variant builds successfully, exports all 127/135 Windows symbols used by LWJGL 3.2.2/3.3.1, and passes `BindingSmoke` under Java 8 and Java 17 without opening a window. Actual hidden-window rendering readiness and mouse focus still require live game tests; export/binding checks do not prove those properties.
-
 This is a prototype compatibility patch, not an upstream GLFW release. A successful native compilation must be followed by real-client focus, input and repeated-switch testing.
 
-`verify_exports.py` reads the installed LWJGL JARs from the project's `.minecraft/libraries` directory, inspects their function tables, and checks all Windows-relevant symbols against the DLL. It verified 127 symbols for LWJGL 3.2.2 and 135 for 3.3.1; the full record is `export-verification.json`. `BindingSmoke.java` also initialized the actual GLFW, NativeWin32 and NativeWGL binding classes successfully under Java 8 / LWJGL 3.2.2 and Java 17 / LWJGL 3.3.1, without opening a window.
+`verify_exports.py` reads the installed LWJGL function tables and compares required Windows symbols with the compiled DLL. The build uses the configured Java 17 runtime and native tools from `PATH`, `EPOCH_GCC`, and `EPOCH_MAKE`.

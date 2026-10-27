@@ -35,7 +35,7 @@ public class Epoch {
    return ActionResult.success(player.getItemInHand(hand));
   }
  });
- public Epoch() { HandoffFence.register(); BLOCKS.register(FMLJavaModLoadingContext.get().getModEventBus()); ITEMS.register(FMLJavaModLoadingContext.get().getModEventBus()); TILES.register(FMLJavaModLoadingContext.get().getModEventBus()); MinecraftForge.EVENT_BUS.register(new Handoff()); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::loaded); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::unloaded); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::playerSaved); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopping); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopped); }
+ public Epoch() { HandoffFence.register(); BLOCKS.register(FMLJavaModLoadingContext.get().getModEventBus()); ITEMS.register(FMLJavaModLoadingContext.get().getModEventBus()); TILES.register(FMLJavaModLoadingContext.get().getModEventBus()); MinecraftForge.EVENT_BUS.register(new Handoff()); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::worldOpened); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::loaded); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::unloaded); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::playerSaved); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopping); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopped); }
  public static class UnknownBlock extends Block {
   public UnknownBlock() { super(AbstractBlock.Properties.of(Material.STONE).strength(1.5f,6f).noOcclusion()); }
   public net.minecraft.block.BlockRenderType getRenderShape(BlockState state) { return net.minecraft.block.BlockRenderType.ENTITYBLOCK_ANIMATED; }

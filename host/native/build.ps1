@@ -1,4 +1,4 @@
-param([switch]$PrepareOnly, [switch]$UsePinnedArchive, [switch]$ChildStartup)
+param([switch]$PrepareOnly, [switch]$UsePinnedArchive, [switch]$ChildStartup, [string]$Gcc = '', [string]$Make = '')
 $ErrorActionPreference = 'Stop'
 $revision = '03f63972b7238a179123f4cb3fa2c2539d5a6dea'
 $nativeSource = Join-Path $PSScriptRoot 'glfw-lwjgl'
@@ -35,7 +35,9 @@ if ($UsePinnedArchive -or -not (Test-Path -LiteralPath (Join-Path $nativeSource 
 }
 Write-Output ('Prepared patched GLFW source: ' + $nativeSource)
 if ($PrepareOnly) { return }
-& cmake -S $nativeSource -B $nativeBuild -G 'MinGW Makefiles' '-DCMAKE_C_COMPILER=C:/mingw64/bin/gcc.exe' '-DCMAKE_MAKE_PROGRAM=C:/mingw64/bin/mingw32-make.exe' '-DCMAKE_POLICY_VERSION_MINIMUM=3.5' -DBUILD_SHARED_LIBS=ON -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF -DCMAKE_BUILD_TYPE=Release
+if (-not $Gcc) { $Gcc = if ($env:EPOCH_GCC) { $env:EPOCH_GCC } else { (Get-Command gcc -ErrorAction Stop).Source } }
+if (-not $Make) { $Make = if ($env:EPOCH_MAKE) { $env:EPOCH_MAKE } else { (Get-Command mingw32-make -ErrorAction Stop).Source } }
+& cmake -S $nativeSource -B $nativeBuild -G 'MinGW Makefiles' "-DCMAKE_C_COMPILER=$Gcc" "-DCMAKE_MAKE_PROGRAM=$Make" '-DCMAKE_POLICY_VERSION_MINIMUM=3.5' -DBUILD_SHARED_LIBS=ON -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw 'GLFW configure failed' }
 & cmake --build $nativeBuild --parallel 8
 if ($LASTEXITCODE -ne 0) { throw 'GLFW build failed' }

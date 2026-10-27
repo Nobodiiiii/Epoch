@@ -1,7 +1,11 @@
 param([switch]$Offline)
 $ErrorActionPreference = 'Stop'
 $epochRoot = Split-Path -Parent $PSScriptRoot
-$env:JAVA_HOME = 'C:\Program Files\Java\jdk-17.0.15.6-hotspot'
+$env:EPOCH_JAVA17_HOME = (& python (Join-Path $PSScriptRoot 'runtime_config.py') --java-home 17).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Java 17 discovery failed' }
+$env:EPOCH_JAVA8_HOME = (& python (Join-Path $PSScriptRoot 'runtime_config.py') --java-home 8).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Java 8 discovery failed' }
+$env:JAVA_HOME = $env:EPOCH_JAVA17_HOME
 $epochGradle = Get-ChildItem -LiteralPath "$env:USERPROFILE\.gradle\wrapper\dists\gradle-8.8-bin" -Recurse -Filter gradle.bat | Select-Object -First 1 -ExpandProperty FullName
 if (-not $epochGradle) { throw 'Gradle 8.8 is required' }
 # Complete all exports before auditing, so no target sees a partial catalog set.

@@ -12,6 +12,8 @@ import org.lwjgl.opengl.Display;
 import java.util.concurrent.*;
 
 public final class ClientHooks {
+ private static final dev.epoch.bridge.PauseOverride focusPause = new dev.epoch.bridge.PauseOverride();
+ static void resetWorld(){Minecraft.getMinecraft().addScheduledTask(() -> {Minecraft mc=Minecraft.getMinecraft();mc.gameSettings.pauseOnLostFocus=focusPause.update(mc.gameSettings.pauseOnLostFocus,false);frozenPose=null;resumeAt=0;renderTicks=0;if(frameCapture!=null)frameCapture.cancel(false);frameCapture=null;});}
  private static BridgeFiles files;
  private static final Object readyLock=new Object();
  private static boolean starting,wasNoGravity;
@@ -46,7 +48,8 @@ public final class ClientHooks {
   dev.epoch.bridge.JourneyMapOrigins.tick(bridge().diagnostics,mc.world!=null&&mc.player!=null);
   if(mc.isGamePaused()&&bridge().needsWorldTick())mc.displayGuiScreen(null);
   if(mc.world!=null&&mc.player!=null&&mc.isSingleplayer()){if(mc.isFullScreen())mc.toggleFullscreen();AutoRuntime.tick(mc.gameDir.toPath(),Epoch.VERSION,hwnd(),mc.getIntegratedServer().getFolderName(),mc.player.getGameProfile().getName(),mc.player.getGameProfile().getId().toString());}
-  mc.gameSettings.pauseOnLostFocus=false;mc.gameSettings.fovSetting=70;mc.gameSettings.viewBobbing=false;mc.gameSettings.thirdPersonView=0;
+  mc.gameSettings.pauseOnLostFocus=focusPause.update(mc.gameSettings.pauseOnLostFocus,frozenPose!=null||Handoff.preparing()||bridge().needsWorldTick());
+  if(Boolean.getBoolean("epoch.fixedView")){mc.gameSettings.fovSetting=70;mc.gameSettings.viewBobbing=false;mc.gameSettings.thirdPersonView=0;}
   if(resumeAt>0&&System.currentTimeMillis()>resumeAt){resumeAt=0;unfreeze(mc);}
   if(System.currentTimeMillis()-heartbeat>250){heartbeat=System.currentTimeMillis();if(mc.player!=null){bridge().diagnostics.put("clientCamera",java.util.Arrays.asList(mc.player.posX,mc.player.posY,mc.player.posZ,mc.player.rotationYaw,mc.player.rotationPitch));bridge().diagnostics.put("clientSelectedSlot",mc.player.inventory.currentItem);bridge().diagnostics.put("clientFrozen",frozenPose!=null);
    java.util.Map<String,Object> input=new java.util.LinkedHashMap<>();
@@ -55,6 +58,6 @@ public final class ClientHooks {
    input.put("moveForward",mc.player.movementInput.moveForward);input.put("moveStrafe",mc.player.movementInput.moveStrafe);input.put("walkSpeed",mc.player.capabilities.getWalkSpeed());input.put("flySpeed",mc.player.capabilities.getFlySpeed());bridge().diagnostics.put("movementInput",input);}bridge().heartbeat();}
   if(!starting&&Boolean.getBoolean("epoch.autoStart")&&mc.currentScreen instanceof GuiMainMenu){starting=true;String world=System.getProperty("epoch.world","Epoch Lab");mc.launchIntegratedServer(world,world,null);}
  }
- @SubscribeEvent public void fixedFov(net.minecraftforge.client.event.FOVUpdateEvent event){event.setNewfov(1.0f);}
+ @SubscribeEvent public void fixedFov(net.minecraftforge.client.event.FOVUpdateEvent event){if(Boolean.getBoolean("epoch.fixedView"))event.setNewfov(1.0f);}
 }
 

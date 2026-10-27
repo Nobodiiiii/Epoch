@@ -12,7 +12,7 @@ public final class StreamingTransformer implements IClassTransformer, Opcodes {
         return new MethodInsnNode(INVOKESTATIC, HOOK, name, descriptor, false);
     }
     public byte[] transform(String name, String transformedName, byte[] bytes) {
-        if (bytes == null || !Boolean.getBoolean("epoch.streaming")) return bytes;
+        if (bytes == null || !dev.epoch.bridge.StreamingMode.enabled()) return bytes;
         boolean provider = transformedName.equals("net.minecraft.world.gen.ChunkProviderServer");
         boolean loader = transformedName.equals("net.minecraft.world.chunk.storage.AnvilChunkLoader");
         boolean chunk = transformedName.equals("net.minecraft.world.chunk.Chunk");
@@ -48,6 +48,8 @@ public final class StreamingTransformer implements IClassTransformer, Opcodes {
             }
         }
         if (hooks != (chunk ? 2 : 1)) throw new IllegalStateException("Epoch missing native hooks in " + transformedName + ": " + hooks);
-        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS); node.accept(writer); return writer.toByteArray();
+        ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS); node.accept(writer);
+        dev.epoch.bridge.StreamingMode.installed(provider ? "provider" : loader ? "loader" : "chunk");
+        return writer.toByteArray();
     }
 }

@@ -8,13 +8,6 @@
 
 ## 已实现
 
-- **原生区块复用**：保存世界 ID、权威修订号和转换规则/代码指纹。干净且一致的区块直接复用；待提交编辑、规则变化、模组代码变化或权威修订变化会使缓存失效。异步加载之后及区块激活时再次检查修订号。
-- **光照复用**：现代版本的缓存光照先从原生解码输入中取出，最终确认地形修订一致后才加入光照队列；缓存失效时不注入旧光照。转换后的区块重新走光照处理。
-- **解码缓存**：每个 ChunkStore 使用上限 32 MiB 的已解码内容缓存，返回独立副本；读取仍验证实际文件内容，不能借缓存绕过损坏检测。仅需修订号时跳过地形解压和 JSON 解析。
-- **状态解析**：旧版缓存成功和失败的解析结果；现代版复用规则上下文并缓存解析结果。规则文件以实际字节判断变化，动态 Java 规则提供者不使用文件缓存。
-- **连续区间填充**：无方块实体且没有附带 NBT 的已知状态区间直接填充数组；含 NBT 的位置仍完整校验，不能因快速路径丢失数据。
-- **诊断**：记录 capture、prepare、apply 的次数、总耗时、均值、最大值及 p95 直方图区间上界。
-
 ## 1.7 普通未知地形
 
 `epoch:packed_unknown` 是没有 TileEntity 的实心占位方块。原始状态、来源版本和来源实例保存在区块级字典中；位置使用有序数组，重复身份在字典中共享。原生区块 `Level.EpochPackedTerrain` 保存 schema 1 二进制数据；共享权威快照仍保存原始方块身份，不增加跨版本通信协议。
@@ -29,22 +22,11 @@
 
 ## 验证
 
-- 五个适配器的离线 Gradle `build` 通过，生成并重混淆安装 JAR。
-- `tests/test_shared.ps1` 通过，其中 ChunkStore 的 156 项检查包含可变副本隔离、修订号读取、缓存失效及同大小/同时间戳文件损坏检测。
-- 1.7 原生转换测试：65,536 个花岗岩未知方块，**0 个 TileEntity**，字典扩展 **262,225 字节**。该数字只包含扩展数据，不是整个存档大小或总内存。另测迁移、删除、掉落物来源，以及已知方块携带不兼容 NBT 时的回退。
-- 1.7 实际 Anvil 保存/加载连续两轮，使用真实转换后的原生加载钩子，并显式设置 `streaming=false`；65,536 个方块及来源身份完整保留。
-- 原有原生保存队列回归测试通过：256 MiB 测试堆下，128 个区块、640,000 个占位实体往返，队列峰值 8。
-- 现代版本的附加原生注册表测试覆盖缓存光照隔离、光照字节保留和负区块段坐标。
-
 日志位于 `build/terrain-optimization-*.log`。没有启动图形客户端、读取截图或进行视觉验收，因此暂不声称具体 FPS、切换秒数或加速倍数；完整游戏中的光照与区块段渲染仍需运行验证。
 
 ### 旧版打包环境修复
 
-2026-10-05 23:47 的 1.20 → 1.12 切换暴露了开发目录测试遗漏：LaunchWrapper 返回 `jar:file:...!/类文件` 作为代码来源，直接 `Paths.get()` 会抛出 `FileSystemNotFoundException`，导致目标内置服务器在加载区块时退出。
-
 已改为从 `JarURLConnection` 取得真实 JAR 文件地址后计算指纹，不依赖预先挂载的 ZIP 文件系统。代码来源无法读取时只禁用原生地形缓存复用，回到正常权威转换路径，并记录一次原因；规则校验错误仍然抛出。
-
-新增测试先在旧实现和旧安装包上复现同一异常，再验证文件、JAR、开发目录、含空格/中文/特殊字符的路径、适配器及其他模组内容变化，以及无法读取指纹时的降级。`tests/test_projection_launchwrapper.ps1` 用 Java 8 和真实 LaunchWrapper 加载最终的 1.7、1.12 JAR；该检查现已接入 `scripts/build.ps1` 的安装前验证。修复日志位于 `build/cache-origin-fix-*.log`。
 
 ## 更新与观察
 
@@ -52,14 +34,6 @@
 
 在 `.minecraft/epoch/control/<实例>/status.json` 的诊断数据中观察：
 
-| 字段 | 含义 |
-|---|---|
-| `nativeTerrainCacheHits` | 当前世界直接复用原生地形的次数 |
-| `terrainConversions` | 当前世界实际转换次数 |
-| `authorityCache` | 已解码内容命中、未命中及缓存字节数 |
-| `terrainTimings` | 进程内累计 capture / prepare / apply 计时；p95 为桶上界 |
-| `streamingTileEntities` | 1.7 已加载区块中的 TileEntity 总数 |
-| `packedTerrainChunks` | 1.7 当前发布的压缩地形区块数 |
-| `packedTerrainDrawCalls` | 1.7 当前帧压缩地形的材质批次数 |
-
 比较时使用相同世界、路径和视距，并区分首次迁移与再次加载。缓存命中应增加；普通未知地形不再使 TileEntity 数量按方块数增长。
+
+Current checkpoint, hashing and collection behavior is documented in [the October 13 audit implementation](AUDIT_OPTIMIZATION_IMPLEMENTATION_2026-10-13.md).

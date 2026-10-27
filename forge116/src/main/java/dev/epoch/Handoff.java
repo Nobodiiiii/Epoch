@@ -21,7 +21,9 @@ import java.util.*;
 public class Handoff {
  static Handoff instance;
  public Handoff(){instance=this;}
-private boolean frozen,announced;
+ private volatile boolean frozen,announced;
+ static boolean preparing(){return AutoRuntime.managed()&&(instance==null||!instance.announced);}
+ void resetWorld(){frozen=announced=false;}
  @SubscribeEvent public void commands(net.minecraftforge.event.RegisterCommandsEvent e){e.getDispatcher().register(net.minecraft.command.Commands.literal("epoch")                .then(net.minecraft.command.Commands.literal("travel").requires(source -> source.hasPermission(2))
                     .then(net.minecraft.command.Commands.literal("cancel").executes(c -> {
                       StreamingWorld.cancelTravel(c.getSource().getPlayerOrException()); return 1;
@@ -42,7 +44,7 @@ private boolean frozen,announced;
   if(server==null || server.isDedicatedServer())return;
   if(!server.getPlayerList().getPlayers().isEmpty())try{
    Path saved=StreamingWorld.restart(server.overworld());
-   if(saved!=null){frozen=true;StreamingWorld.verifyImport(server.overworld(),saved);importWorld(server,Snapshot.read(saved));StreamingWorld.resume(server.overworld());StreamingWorld.restarted(server.overworld());frozen=false;ClientHooks.resumeAt=System.currentTimeMillis()+400;ClientHooks.bridge().diagnostics.put("restartRestored",true);}
+   if(saved!=null){frozen=true;StreamingWorld.verifyImport(server.overworld(),saved);importWorld(server,StreamingWorld.readSnapshot(server.overworld(), saved));StreamingWorld.resume(server.overworld());StreamingWorld.restarted(server.overworld());frozen=false;ClientHooks.resumeAt=System.currentTimeMillis()+400;ClientHooks.bridge().diagnostics.put("restartRestored",true);}
   }catch(Exception error){frozen=true;ClientHooks.bridge().status("","ERROR",error.toString());}
   if(!announced && !server.getPlayerList().getPlayers().isEmpty()){announced=true;ClientHooks.bridge().status("","READY","Integrated world ready; region x,z [-32,31], y [0,255]");}
   try { if(!frozen)StreamingWorld.tick(server.overworld()); } catch(Exception error){frozen=true;ClientHooks.freezeCurrent();ClientHooks.bridge().status("","ERROR",error.toString());}
@@ -54,29 +56,27 @@ private boolean frozen,announced;
   }while(frozen && server.isRunning());
  }
  void handle(MinecraftServer server,BridgeFiles.Command cmd)throws Exception{try{switch(cmd.action){
-  case "export": frozen=true;double[] camera=ClientHooks.captureFrozen();ClientHooks.bridge().diagnostics.put("exportInputWaitMillis",HandoffFence.drain(server,player(server).connection.connection));StreamingWorld.flush(server.overworld());Snapshot snapshot=exportWorld(server);snapshot.x=camera[0];snapshot.y=camera[1];snapshot.z=camera[2];snapshot.yaw=(float)camera[3];snapshot.pitch=(float)camera[4];snapshot.write(Paths.get(cmd.path));StreamingWorld.exported(server.overworld(),Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"EXPORTED","World snapshot committed; simulation frozen");break;
-  case "import": frozen=true;ClientHooks.freezeCurrent();StreamingWorld.verifyImport(server.overworld(),Paths.get(cmd.path));importWorld(server,Snapshot.read(Paths.get(cmd.path)));ClientHooks.markImported(cmd.id);break;
+  case "export": frozen=true;double[] camera=ClientHooks.captureFrozen();ClientHooks.bridge().diagnostics.put("exportInputWaitMillis",HandoffFence.drain(server,player(server).connection.connection));StreamingWorld.flush(server.overworld());Snapshot snapshot=exportWorld(server);snapshot.x=camera[0];snapshot.y=camera[1];snapshot.z=camera[2];snapshot.yaw=(float)camera[3];snapshot.pitch=(float)camera[4];StreamingWorld.exported(server.overworld(),snapshot,Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"EXPORTED","World snapshot committed; simulation frozen");break;
+  case "import": frozen=true;ClientHooks.freezeCurrent();StreamingWorld.verifyImport(server.overworld(),Paths.get(cmd.path));importWorld(server,StreamingWorld.readSnapshot(server.overworld(), Paths.get(cmd.path)));ClientHooks.markImported(cmd.id);break;
   case "freeze":frozen=true;ClientHooks.freezeCurrent();ClientHooks.bridge().status(cmd.id,"FROZEN","Simulation frozen");break;
-  case "resume":StreamingWorld.resume(server.overworld());frozen=false;ClientHooks.resumeAt=System.currentTimeMillis()+400;ClientHooks.bridge().status(cmd.id,"READY","Simulation resumed");break;
+  case "recoverresume":
+        case "resume":StreamingWorld.resume(server.overworld());frozen=false;ClientHooks.resumeAt=System.currentTimeMillis()+400;ClientHooks.bridge().status(cmd.id,"READY","Simulation resumed");break;
   case "catalog":ClientHooks.catalog();ClientHooks.bridge().status(cmd.id,"CATALOG","Instance catalog available in diagnostics");break;
   case "select":ClientHooks.select(cmd.path);ClientHooks.bridge().status(cmd.id,"SELECTED","Target instance requested");break;
   case "usekey":ClientHooks.bridge().status(cmd.id,"KEY_TRIGGERED","Invoking actual Epoch Key item use on client");ClientHooks.useKey(cmd.id);break;
-  case "streamtest":ClientHooks.bridge().diagnostics.put("streamingTest",StreamingWorld.selfTest(server.overworld()));ClientHooks.bridge().status(cmd.id,"STREAM_TESTED","Native streaming checks passed");break;
-  case "streamexplore":StreamingWorld.exploreTest(server.overworld());ClientHooks.bridge().status(cmd.id,"STREAM_EXPLORING","Scripted exploration running");break;
-  case "streamposition":ClientHooks.bridge().diagnostics.put("streamingPosition",StreamingWorld.positionTest(server.overworld()));ClientHooks.bridge().status(cmd.id,"STREAM_POSITION","Remote collision checked");break;
-  case "streamrestore":ClientHooks.bridge().diagnostics.put("streamingRestore",StreamingWorld.restoreTest(server.overworld()));ClientHooks.bridge().status(cmd.id,"STREAM_RESTORED","Restart checked");break;
-  case "streaminspect":case "streamedit":ClientHooks.bridge().diagnostics.put("streamingInspect",StreamingWorld.inspectTest(server.overworld(),"streamedit".equals(cmd.action)));ClientHooks.bridge().status(cmd.id,"STREAM_INSPECTED","Terrain inspected");break;
-  case "testedit":testedit(server);ClientHooks.bridge().status(cmd.id,frozen?"FROZEN":"READY","Deleted placeholder (0,64,3) without drop; stone (1,64,3) replaced with dirt");break;
-  case "testsetup":testsetup(server);ClientHooks.bridge().status(cmd.id,"READY","Lab prepared");break;
-  case "registry":NativeStates.catalog(NativeStates.mods()).write(Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"REGISTRY_EXPORTED","Registry catalog written");break;
+  case "reloadrules":
+          CompatibilityRules.reload(CompatibilityRules.directory());
+          ClientHooks.bridge().status(cmd.id, "RULES_RELOADED", "Compatibility rules published");
+          break;
+        case "registry":NativeStates.catalog(NativeStates.mods()).write(Paths.get(cmd.path));ClientHooks.bridge().status(cmd.id,"REGISTRY_EXPORTED","Registry catalog written");break;
   case "auditstates":RegistryCatalog.writeJson(Paths.get(cmd.path+".audit-"+Epoch.VERSION+".json"),NativeStates.context().audit(RegistryCatalog.read(Paths.get(cmd.path))));ClientHooks.bridge().status(cmd.id,"STATES_AUDITED","State audit written");break;
-  case "probe":probe(server);ClientHooks.bridge().status(cmd.id,"PROBED","Probe available in diagnostics");break;
-  case "shutdown":StreamingWorld.flush(server.overworld());frozen=false;Minecraft.getInstance().execute(()->Minecraft.getInstance().stop());break;
+  case "leaveworld":frozen=false;Minecraft.getInstance().execute(() -> { Minecraft.getInstance().clearLevel(); Minecraft.getInstance().setScreen(new net.minecraft.client.gui.screen.MainMenuScreen()); });ClientHooks.bridge().status(cmd.id,"WORLD_LEFT","World session exit requested");break;case "shutdown":StreamingWorld.flush(server.overworld());frozen=false;Minecraft.getInstance().execute(()->Minecraft.getInstance().stop());break;
   default:throw new IllegalArgumentException("Unknown action "+cmd.action);
  }}catch(Exception ex){ClientHooks.bridge().status(cmd.id,"ERROR",ex.toString());throw ex;}}
  ServerPlayerEntity player(MinecraftServer server){if(server.getPlayerList().getPlayers().size()!=1)throw new IllegalStateException("Epoch v0.1 requires exactly one player");ServerPlayerEntity p=server.getPlayerList().getPlayers().get(0);if(p.level.dimension()!=World.OVERWORLD)throw new IllegalStateException("Epoch v0.1 supports the Overworld only");int limit=StreamingWorld.enabled(server.overworld())?30000000:32;if(p.getX()< -limit||p.getX()>=limit||p.getZ()< -limit||p.getZ()>=limit||p.getY()<0||p.getY()>=256)throw new IllegalStateException("Outside Epoch v0.1 shared region [-32,32), y [0,256)");return p;}
  Snapshot exportWorld(MinecraftServer server) throws Exception { return exportWorld(server, player(server)); }
  Snapshot exportWorld(MinecraftServer server, ServerPlayerEntity p) throws Exception {ServerWorld level=server.overworld();Snapshot s=new Snapshot();s.version=Epoch.VERSION;s.sourceInstance = dev.epoch.bridge.Appearance.instance();s.x=p.getX();s.y=p.getY();s.z=p.getZ();s.yaw=p.yRot;s.pitch=p.xRot;s.gameTime=level.getGameTime();s.dayTime=level.getDayTime();s.inventory=p.inventory.save(new ListNBT()).toString();s.selectedSlot=p.inventory.selected;StreamingWorld.configureSnapshot(level,s,p.getX(),p.getZ());EnvironmentTransfer.capture(server,level,p,s);
+    if (StreamingWorld.reuseTerrain(level, s)) return s;
   Map<String,Integer> ids=new HashMap<>();Map<BlockState,String> encodedStates=new IdentityHashMap<>();List<Integer> runs=new ArrayList<>();int previous=-1,count=0;
   for(int y=0;y<s.sizeY;y++)for(int z=0;z<s.sizeZ;z++)for(int x=0;x<s.sizeX;x++){
    int index=(y*s.sizeZ+z)*s.sizeX+x;BlockPos pos=new BlockPos(x+s.x0,y+s.y0,z+s.z0);BlockState state=level.getBlockState(pos);TileEntity be=state.hasTileEntity()?level.getBlockEntity(pos):null;String snbt=encodedStates.get(state);if(snbt==null){snbt=NBTUtil.writeBlockState(state).toString();encodedStates.put(state,snbt);}String beNbt=be==null?null:be.save(new CompoundNBT()).toString();
@@ -181,16 +181,7 @@ private boolean frozen,announced;
   }
 
 
- void testedit(MinecraftServer server){
-  ServerWorld level=server.overworld();
-  level.destroyBlock(new BlockPos(0,64,3),false);
-  level.setBlock(new BlockPos(1,64,3),Blocks.DIRT.defaultBlockState(),2|16);
-  ServerPlayerEntity player=player(server);
-  // Flush changed chunks immediately, including when the server is held between ticks.
-  player.connection.send(new net.minecraft.network.play.server.SChunkDataPacket(level.getChunk(0,0),65535));
-  probe(server);
- }
- void testsetup(MinecraftServer server){ServerWorld level=server.overworld();for(int z=-12;z<=12;z++)for(int x=-12;x<=12;x++){level.setBlock(new BlockPos(x,63,z),Blocks.GRASS_BLOCK.defaultBlockState(),2);for(int y=64;y<=72;y++)level.setBlock(new BlockPos(x,y,z),Blocks.AIR.defaultBlockState(),2);}level.setBlock(new BlockPos(0,64,3),Blocks.OAK_PLANKS.defaultBlockState(),2);level.setBlock(new BlockPos(1,64,3),Blocks.STONE.defaultBlockState(),2);level.setBlock(new BlockPos(-1,64,3),Blocks.CHEST.defaultBlockState(),2);if(level.getBlockEntity(new BlockPos(-1,64,3)) instanceof ChestTileEntity){ChestTileEntity chest=(ChestTileEntity)level.getBlockEntity(new BlockPos(-1,64,3));ItemStack sentinel=new ItemStack(Items.DIAMOND,7);sentinel.setHoverName(new StringTextComponent("Epoch NBT sentinel"));chest.setItem(0,sentinel);chest.setChanged();}ServerPlayerEntity p=server.getPlayerList().getPlayers().get(0);p.teleportTo(level,0.5,64,-3.5,0,10);p.setGameMode(net.minecraft.world.GameType.CREATIVE);p.inventory.setItem(0,new ItemStack(Epoch.KEY.get()));level.setDayTime(6000);level.getGameRules().getRule(net.minecraft.world.GameRules.RULE_DAYLIGHT).set(false,server);level.getGameRules().getRule(net.minecraft.world.GameRules.RULE_WEATHER_CYCLE).set(false,server);level.getGameRules().getRule(net.minecraft.world.GameRules.RULE_RANDOMTICKING).tryDeserialize("0");}
- void probe(MinecraftServer server){ServerWorld level=server.overworld();for(int x=-1;x<=2;x++){BlockPos pos=new BlockPos(x,64,3);ClientHooks.bridge().diagnostics.put("block_"+x,NBTUtil.writeBlockState(level.getBlockState(pos)).toString());TileEntity be=level.getBlockEntity(pos);if(be!=null)ClientHooks.bridge().diagnostics.put("nbt_"+x,be.save(new CompoundNBT()).toString());}ServerPlayerEntity p=server.getPlayerList().getPlayers().get(0);ClientHooks.bridge().diagnostics.put("camera",Arrays.asList(p.getX(),p.getY(),p.getZ(),p.yRot,p.xRot));long items=0;for(net.minecraft.entity.Entity entity:level.getAllEntities())if(entity instanceof net.minecraft.entity.item.ItemEntity)items++;ClientHooks.bridge().diagnostics.put("itemEntityCount",items);}
+
+
 }
 

@@ -2,13 +2,13 @@
 import argparse, json, os, pathlib, re, subprocess, uuid, zipfile, sys, time, hashlib, shlex
 from contextlib import contextmanager
 from epoch_instances import discover, read_profile, profile_versions, SUPPORTED, install_adapter, atomic_json, load_json, inside
-from prepare_lab import create, force_windowed
+from save_format import create, force_windowed
 from prepare_transfer import prepare as prepare_transfer
+from runtime_config import java_home
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MINECRAFT = ROOT / '.minecraft'
-JAVA17 = pathlib.Path(r'C:\Program Files\Java\jdk-17.0.15.6-hotspot\bin')
-JAVA8 = pathlib.Path(r'C:\Users\Nobodiiiii\.jdks\corretto-1.8.0_492\bin')
+JAVA17 = java_home(17) / 'bin'
 
 def allowed(obj):
     if 'rules' not in obj: return True
@@ -32,13 +32,16 @@ def streaming_binding(seed):
         diagnostics = load_json(control / 'status.json').get('diagnostics', {})
     except FileNotFoundError:
         return None
-    if diagnostics.get('streamingProtocol') != 3:
+    protocol = diagnostics.get('streamingProtocol')
+    if protocol not in (None, 5):
+        raise ValueError('Update all Epoch adapters together; this authority requires streaming protocol 5')
+    if protocol is None and not seed.get('streaming'):
         return None
-    binding = pathlib.Path(diagnostics['streamingBinding']).resolve()
+    binding = pathlib.Path(diagnostics.get('streamingBinding') or seed['authorityBinding']).resolve()
     if not inside(binding, seed['gameDir']):
         raise ValueError('Source authority binding is outside its game directory')
     value = load_json(binding)
-    if value.get('schema') != 3 or value.get('worldId') != diagnostics.get('streamingWorldId'):
+    if value.get('schema') != 3 or value.get('worldId') != (diagnostics.get('streamingWorldId') or seed.get('worldId')):
         raise ValueError('Source authority binding does not match its running world')
     return binding
 
@@ -57,7 +60,7 @@ def saved_target_world(game, binding_file, fallback):
     return fallback, False
 
 
-def resolve(version, entry, seed=None, standalone=False, lab=False):
+def resolve(version, entry, seed=None, standalone=False):
     name = version + '-Forge'
     profile = pathlib.Path(entry['versionJson'])
     data = read_profile(profile)
@@ -108,7 +111,10 @@ def resolve(version, entry, seed=None, standalone=False, lab=False):
             result.extend(expand(x) for x in (item if isinstance(item,list) else [item]))
         return result
     legacy=version in ('1.7.10','1.12.2')
-    argv=[str((JAVA17 if version in ('1.18.2','1.20.1') else JAVA8)/'javaw.exe'),'-Xms512M','-Xmx3G','-Depoch.projectRoot='+str(ROOT)]
+    heap = int(os.environ.get('EPOCH_CLIENT_HEAP_MB', '3072'))
+    if not 512 <= heap <= 16384: raise ValueError('EPOCH_CLIENT_HEAP_MB must be between 512 and 16384')
+    client_java = JAVA17 if version in ('1.18.2','1.20.1') else java_home(8) / 'bin'
+    argv=[str(client_java/'javaw.exe'),'-Xms256M',f'-Xmx{heap}M','-Depoch.projectRoot='+str(ROOT)]
     if seed:
         binding = streaming_binding(seed)
         if binding and version not in ('1.7.10', '1.12.2', '1.16.5', '1.18.2', '1.20.1'):
@@ -128,10 +134,9 @@ def resolve(version, entry, seed=None, standalone=False, lab=False):
         force_windowed(game)
         argv+=['-Depoch.autoStart=true','-Depoch.world='+world,'-Depoch.managed=true','-Depoch.sessionId='+seed['sessionId'],'-Depoch.instanceId='+entry['id'],'-Depoch.controlDir='+str(control)]
         if binding:
-            argv+=['-Depoch.streaming=true','-Depoch.authorityBinding='+str(binding)]
-    elif standalone and lab:
-        create(version,folder=game,world_name='Epoch Lab')
-        argv+=['-Depoch.autoStart=true','-Depoch.world=Epoch Lab']
+            argv+=['-Depoch.streaming=true','-Depoch.authorityBinding='+str(binding),'-Depoch.worldId='+load_json(binding)['worldId']]
+        elif seed.get('worldId'):
+            argv+=['-Depoch.worldId='+seed['worldId']]
     glfw = ROOT / 'host' / 'native' / ('epoch-glfw-child.dll' if seed else 'epoch-glfw.dll')
     if not standalone and not legacy and not glfw.is_file():
         raise FileNotFoundError('Epoch requires its cross-process-safe GLFW build: '+str(glfw))
@@ -144,7 +149,13 @@ def resolve(version, entry, seed=None, standalone=False, lab=False):
     game_args=data.get('arguments',{}).get('game') or shlex.split(data.get('minecraftArguments',''))
     argv += arguments(jvm) + [data['mainClass']] + arguments(game_args)
     argv += ['--width','1280','--height','720']
-    launch={'argv':argv,'cwd':str(game)}
+    launch={'schema':1,'instanceId':entry['id'],'version':version,'protocol':5,
+            'javaHome':str(client_java.parent),'heapMb':heap,'argv':argv,'cwd':str(game),
+            'nativeComponents':{'glfw':str(glfw),'legacyAgent':str(ROOT/'host/legacy/epoch-legacy-agent.jar'),
+                                'legacyWindow':str(ROOT/'host/legacy/epoch-legacy-window.dll')},
+            'adapter':load_json(game/'epoch/adapter.json') if (game/'epoch/adapter.json').is_file() else {},
+            'sessionId':seed.get('sessionId','') if seed else '',
+            'worldId':seed.get('worldId','') if seed else ''}
     atomic_json(control/'launch.json',launch)
     return launch
 
@@ -208,7 +219,14 @@ def session_catalog(seed_path,locked=False):
     if not inside(seed['gameDir'],ROOT):raise ValueError('Source outside Epoch directory')
     status=host_status()
     if host_lock_busy() and status.get('sessionId')!=seed['sessionId']:
-        raise RuntimeError('另一个 Epoch 宿主仍持有会话锁，请先关闭其原始实例；错误状态不会释放会话所有权')
+        previous = status.get('sessionId', '')
+        ending = pathlib.Path(seed['controlDir']) / ('session-stop-' + previous + '.json')
+        if status.get('sourcePID') == seed.get('pid') and ending.is_file():
+            deadline = time.monotonic() + 60
+            while host_lock_busy() and time.monotonic() < deadline:
+                time.sleep(.1)
+        if host_lock_busy():
+            raise RuntimeError('另一个 Epoch 世界会话仍在运行或退出中，请等待其结束后重试')
     seed.update(seedPath=str(seed_path),pythonExecutable=sys.executable)
     atomic_json(seed_path,seed)
     catalog=discover(ROOT,seed)
@@ -230,7 +248,10 @@ def adopt(seed_path):
             raise RuntimeError('当前 Epoch 宿主持锁但未响应；请关闭原始实例后重试')
         classes,cp=build_host()
         started=int(time.time()*1000)
-        process=subprocess.Popen([str(JAVA17/'javaw.exe'),'-cp',str(classes)+';'+cp,'EpochHost',str(ROOT),'--adopt',str(pathlib.Path(seed_path).resolve())],cwd=ROOT)
+        heap=int(os.environ.get('EPOCH_CLIENT_HEAP_MB','3072'))
+        budget=int(os.environ.get('EPOCH_WARMUP_BUDGET_MB','6144'))
+        if budget < heap: raise ValueError('EPOCH_WARMUP_BUDGET_MB must accommodate at least one client heap')
+        process=subprocess.Popen([str(JAVA17/'javaw.exe'),'-Depoch.warmup.maxInstances='+str(min(4,budget//heap)),'-cp',str(classes)+';'+cp,'EpochHost',str(ROOT),'--adopt',str(pathlib.Path(seed_path).resolve())],cwd=ROOT)
         end=time.monotonic()+30
         while time.monotonic()<end:
             if process.poll() is not None:raise RuntimeError('Epoch 宿主启动失败，退出码 '+str(process.returncode))
@@ -266,10 +287,9 @@ def main():
     parser.add_argument('--prepare-target')
     parser.add_argument('--standalone',choices=list(SUPPORTED),help='Start one installed .minecraft/versions profile at its main menu')
     parser.add_argument('--profile',help='Existing profile directory name; defaults to <version>-Forge')
-    parser.add_argument('--lab',action='store_true',help='Explicitly create and enter Epoch Lab in the selected profile')
     args=parser.parse_args()
-    if (args.profile or args.lab or args.prepare_only) and not args.standalone:
-        parser.error('--profile, --lab and --prepare-only require --standalone')
+    if (args.profile or args.prepare_only) and not args.standalone:
+        parser.error('--profile and --prepare-only require --standalone')
     if (args.discover or args.prepare_target) and not args.seed:
         parser.error('--discover and --prepare-target require --seed')
     if args.discover or args.prepare_target:
@@ -299,7 +319,7 @@ def main():
         if entry is None or not entry['supported']:
             raise ValueError('Selected profile does not provide the requested Forge version')
         install_adapter(ROOT,entry)
-        launch=resolve(args.standalone,entry,standalone=True,lab=args.lab)
+        launch=resolve(args.standalone,entry,standalone=True)
         if args.prepare_only:
             print('Prepared existing profile:',game)
             return

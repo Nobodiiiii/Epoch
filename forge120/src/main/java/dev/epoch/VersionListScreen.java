@@ -71,7 +71,7 @@ final class VersionListScreen extends Screen {
       addRenderableWidget(button);
       Button warmup = Button.builder(Component.literal(instance.warmupLabel()), b -> warmup(instance))
           .bounds((width + listWidth) / 2 - 80, 66 + i * 27, 80, 22).build();
-      warmup.active = instance.canWarmup();
+      warmup.active = (instance.canWarmup() || instance.canRelease());
       warmup.setTooltip(Tooltip.create(Component.literal(instance.detail())));
       addRenderableWidget(warmup);
     }

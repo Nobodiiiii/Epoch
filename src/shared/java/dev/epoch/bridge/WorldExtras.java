@@ -102,6 +102,9 @@ public final class WorldExtras {
     }
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
+    private static final Map<Path,Carry> CARRIES = new LinkedHashMap<Path,Carry>(4, .75f, true) {
+        protected boolean removeEldestEntry(Map.Entry<Path,Carry> entry) { return size() > 4; }
+    };
     public static Map<String,Object> diagnostics(Carry carry) throws IOException {
         Map<String,Object> out=new LinkedHashMap<String,Object>();
         int volume=carry.sizeX*carry.sizeZ*(carry.sizeY/4), changed=0;
@@ -111,8 +114,10 @@ public final class WorldExtras {
         out.put("inactiveGameRules",new ArrayList<String>(carry.rules.keySet()));out.put("playerGameplayState",true);
         return out;
     }
-    public static Carry readCarry(Path file) throws IOException {
-        if (!Files.exists(file)) return null;
+    public static synchronized Carry readCarry(Path file) throws IOException {
+        file = file.toAbsolutePath().normalize();
+        if (CARRIES.containsKey(file)) return CARRIES.get(file);
+        if (!Files.exists(file)) { CARRIES.put(file, null); return null; }
         try (Reader reader = new InputStreamReader(new GZIPInputStream(Files.newInputStream(file)), StandardCharsets.UTF_8)) {
             Carry carry = GSON.fromJson(reader, Carry.class);
             if (carry == null || carry.schema != 1) throw new IOException("Invalid environment carry");
@@ -122,18 +127,21 @@ public final class WorldExtras {
             int volume=carry.sizeX*carry.sizeZ*(carry.sizeY/4);carry.original.expand(volume);carry.applied.expand(volume);
             for(Map.Entry<String,String> entry:carry.rules.entrySet())if(entry.getKey()==null||entry.getValue()==null||entry.getKey().length()>256||entry.getValue().length()>256)throw new IOException("Invalid carried rule");
             if((carry.playerOriginal==null)!=(carry.playerApplied==null)||carry.playerOriginal!=null&&(carry.playerOriginal.length()>4*1024*1024||carry.playerApplied.length()>4*1024*1024))throw new IOException("Invalid carried player");
-            return carry;
+            CARRIES.put(file, carry); return carry;
         } catch (RuntimeException error) { throw new IOException("Malformed environment carry", error); }
     }
-    public static void writeCarry(Path file, Carry carry) throws IOException {
+    public static synchronized void writeCarry(Path file, Carry carry) throws IOException {
+        file = file.toAbsolutePath().normalize();
         Files.createDirectories(file.toAbsolutePath().getParent());
         Path temp = Files.createTempFile(file.toAbsolutePath().getParent(), "environment-", ".tmp");
         try {
             try (Writer writer = new OutputStreamWriter(new GZIPOutputStream(Files.newOutputStream(temp)), StandardCharsets.UTF_8)) { GSON.toJson(carry, writer); }
             try { Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
             catch (AtomicMoveNotSupportedException ignored) { Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING); }
+            CARRIES.put(file, carry);
         } finally { Files.deleteIfExists(temp); }
     }
+    public static synchronized void forgetCarry(Path file) { CARRIES.remove(file.toAbsolutePath().normalize()); }
 
     public static void validateRule(String key, String value, String nativeValue) throws IOException {
         if ("true".equals(nativeValue) || "false".equals(nativeValue)) {

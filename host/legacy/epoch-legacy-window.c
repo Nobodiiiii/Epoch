@@ -238,26 +238,3 @@ JNIEXPORT jlongArray JNICALL Java_dev_epoch_legacy_EpochLegacyAgent_diagnostics(
     if (result) (*env)->SetLongArrayRegion(env, result, 0, 7, values);
     return result;
 }
-
-/* A never-shown same-process parent allows smoke tests to exercise post-adoption
- * visibility without displaying any test windows on the user's desktop. */
-JNIEXPORT jlong JNICALL Java_dev_epoch_legacy_EpochLegacyAgent_adoptForSmoke(JNIEnv *env, jclass cls, jlong child_value) {
-    (void)env; (void)cls;
-    HWND child = (HWND)(intptr_t)child_value;
-    HWND parent = CreateWindowExW(0, L"STATIC", L"Epoch hidden binding smoke", WS_OVERLAPPED,
-                                  0, 0, 96, 96, NULL, NULL, GetModuleHandleW(NULL), NULL);
-    if (!parent || !IsWindow(child)) return 0;
-    LONG_PTR style = GetWindowLongPtrW(child, GWL_STYLE);
-    SetWindowLongPtrW(child, GWL_STYLE, (style & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME)) | WS_CHILD);
-    SetLastError(0);
-    HWND previous = SetParent(child, parent);
-    if (!previous && GetLastError()) { DestroyWindow(parent); return 0; }
-    // Use the guard itself here; the smoke confirms it permits WS_VISIBLE after adoption.
-    guarded_ShowWindow(child, SW_SHOWNA);
-    return (jlong)(intptr_t)parent;
-}
-
-JNIEXPORT void JNICALL Java_dev_epoch_legacy_EpochLegacyAgent_releaseSmokeParent(JNIEnv *env, jclass cls, jlong value) {
-    (void)env; (void)cls;
-    if (value) DestroyWindow((HWND)(intptr_t)value);
-}

@@ -12,6 +12,8 @@ import org.lwjgl.glfw.GLFWNativeWin32;
 import java.nio.file.Paths;
 @Mod.EventBusSubscriber(modid="epoch",value=Dist.CLIENT)
 public class ClientHooks {
+ private static final dev.epoch.bridge.PauseOverride focusPause = new dev.epoch.bridge.PauseOverride();
+ static void resetWorld(){Minecraft.getInstance().execute(() -> {Minecraft mc=Minecraft.getInstance();mc.options.pauseOnLostFocus=focusPause.update(mc.options.pauseOnLostFocus,false);frozenPose=null;resumeAt=0;renderTicks=0;if(frameCapture!=null)frameCapture.cancel(false);frameCapture=null;});}
  private static BridgeFiles files;
  private static boolean starting; private static long heartbeat;
  private static final Object readyLock=new Object(); static volatile int renderTicks; static volatile long resumeAt; private static volatile double[] frozenPose; private static boolean wasNoGravity;
@@ -101,7 +103,8 @@ public class ClientHooks {
    AutoRuntime.tick(mc.gameDirectory.toPath(),Epoch.VERSION,GLFWNativeWin32.glfwGetWin32Window(mc.getWindow().getWindow()),mc.getSingleplayerServer().getWorldPath(net.minecraft.world.storage.FolderName.ROOT).normalize().getFileName().toString(),mc.player.getGameProfile().getName(),mc.player.getGameProfile().getId().toString());
   }
   if(mc.isPaused() && bridge().needsWorldTick())mc.setScreen(null);
-  mc.options.pauseOnLostFocus=false;mc.options.fov=70;mc.options.bobView=false;mc.options.fovEffectScale=0;
+  mc.options.pauseOnLostFocus=focusPause.update(mc.options.pauseOnLostFocus,frozenPose!=null||Handoff.preparing()||bridge().needsWorldTick());
+  if(Boolean.getBoolean("epoch.fixedView")){mc.options.fov=70;mc.options.bobView=false;mc.options.fovEffectScale=0;}
   if(resumeAt>0&&System.currentTimeMillis()>resumeAt){resumeAt=0;unfreeze(mc);}
   if(System.currentTimeMillis()-heartbeat>250){
    heartbeat=System.currentTimeMillis();

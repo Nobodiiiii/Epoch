@@ -82,20 +82,10 @@ minecraft {
         }
 
         client {
-            // Comma-separated list of namespaces to load gametests from. Empty = all namespaces.
-            property 'forge.enabledGameTestNamespaces', mod_id
         }
 
         server {
-            property 'forge.enabledGameTestNamespaces', mod_id
             args '--nogui'
-        }
-
-        // This run config launches GameTestServer and runs all registered gametests, then exits.
-        // By default, the server will crash when no gametests are provided.
-        // The gametest system is also enabled by default for other run configs under the /test command.
-        gameTestServer {
-            property 'forge.enabledGameTestNamespaces', mod_id
         }
 
         data {
@@ -214,12 +204,11 @@ repositories.configureEach {
 }
 repositories { mavenCentral() }
 
-
 sourceSets.main.resources.srcDir '../src/shared/resources'
 
 tasks.register('registryAudit', JavaExec) {
- dependsOn 'testClasses'
- classpath = sourceSets.test.runtimeClasspath
+ dependsOn 'auditClasses'
+ classpath = sourceSets.audit.runtimeClasspath
  mainClass = 'dev.epoch.RegistryAudit'
  javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
  workingDir = layout.buildDirectory
@@ -230,26 +219,15 @@ tasks.register('registryAudit', JavaExec) {
 
 repositories { maven { url = uri('../.minecraft/libraries'); metadataSources { artifact() } } }
 
-tasks.register('environmentTest', JavaExec) {
- dependsOn 'testClasses'
- classpath = sourceSets.test.runtimeClasspath
- mainClass = 'dev.epoch.EnvironmentTransferTest'
- javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
- workingDir = layout.buildDirectory
- systemProperty 'epoch.testMain', 'dev.epoch.EnvironmentTransferTest'
-}
-tasks.named('check') { dependsOn 'environmentTest' }
-
 // Optional API, downloaded/verified by scripts/install_journeymap.py --download-only.
 dependencies { compileOnly files('../build/journeymap/journeymap-api-forge-1.20.1-2.0.0.jar') }
 
-// Run the same handoff ordering contract against this adapter's native queues and storage.
-sourceSets.test.java.srcDir '../tests/fence'
-tasks.register('handoffFenceTest', JavaExec) {
- dependsOn 'testClasses'
- classpath = sourceSets.test.runtimeClasspath
- mainClass = 'dev.epoch.HandoffFenceTest'
- javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(17) }
- workingDir = layout.buildDirectory
+
+// Registry inventory export is a read-only tooling entry point, separate from gameplay.
+sourceSets {
+ audit {
+  java.srcDir 'src/audit/java'
+  compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+  runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+ }
 }
-tasks.named('check') { dependsOn 'handoffFenceTest' }

@@ -27,6 +27,7 @@ public final class StreamingWorld {
         String worldId;
         long revision;
         String format, cacheStamp;
+        transient boolean baselineEligible;
         WorldExtras.Carry residual;
     }
     /** Adopt legacy residuals both when decoding saved chunks and when generating new chunks. */
@@ -74,20 +75,20 @@ public final class StreamingWorld {
         long detachedBytes;
         int peakDetached;
         final Map<Chunk, Projection> projections = new WeakHashMap<>();
-        final ConcurrentMap<ChunkKey, ChunkStore.Versioned> incoming = new ConcurrentHashMap<>();
+        final IncomingChunks incoming = new IncomingChunks();
         final Set<ChunkKey> changed = ConcurrentHashMap.newKeySet();
-        final ExecutorService reads = Executors.newSingleThreadExecutor(task -> {
-            Thread thread = new Thread(task, "Epoch authority reads"); thread.setDaemon(true); return thread;
-        });
+        final AuthorityReads reads = new AuthorityReads();
+        final SavedWorld.Publisher saves = new SavedWorld.Publisher();
         volatile ChunkStore.Lease lease;
         ChunkWriteQueue writes;
         volatile Throwable failure;
         boolean applying;
         long ticks, nativeCacheHits, terrainConversions;
         final DestinationLoader destination;
-        Exploration exploration;
 
         Context(WorldServer level) throws Exception {
+            try {
+            StreamingMode.requireLegacy(Epoch.class.getClassLoader());
             this.level = level; destination = new DestinationLoader(level); world = level.getSaveHandler().getWorldDirectory().toPath().toRealPath();
             Path game = Minecraft.getMinecraft().mcDataDir.toPath();
             AutoRuntime.controlDirectory(game, Epoch.VERSION);
@@ -103,23 +104,24 @@ public final class StreamingWorld {
                     throw new IOException("Target save belongs to a different authority");
                 binding.write(localBinding);
             }
-            store = new ChunkStore(Paths.get(binding.authority), binding.worldId);
-            legacyResidual = WorldExtras.readCarry(world.resolve("epoch/environment.json.gz"));
+            if (world.equals(Paths.get(binding.sourceWorld)) && !Epoch.VERSION.equals(binding.sourceVersion))
+                throw new IOException("Open the original native world with its original Minecraft version");
+            store = saves.openStore(Paths.get(binding.authority), binding.worldId);
+            legacyResidual = saves.readCarry(world.resolve("epoch/environment.json.gz"));
             boolean joining = AutoRuntime.managed() || !shared.isEmpty();
             session = WorldSession.open(Paths.get(binding.authority), instance, joining);
             try {
-                if (!joining) {
-                    Path saved = SavedWorld.latest(binding);
-                    ChunkStore.Lease previous = store.lease();
-                    if (saved != null) {
-                        // No live member exists: authorize a new import from the last saved state.
-                        restart = saved;
-                    } else {
-                        // Pre-checkpoint worlds retain their native player state and canonical terrain.
-                        becomeWriter(store.transfer(previous.epoch, instance));
-                    }
-                }
+                WorldSession.Startup startup = session.initialize(binding, store, saves, instance, joining);
+                restart = startup.restart;
+                if (startup.writer != null) becomeWriter(startup.writer);
             } catch (Exception error) { session.close(); throw error; }
+            AutoRuntime.bindWorld(world.resolve("epoch/authority.json"), binding.worldId);
+            } catch (Exception error) {
+                reads.close();
+                try { saves.close(); } catch (IOException closing) { error.addSuppressed(closing); }
+                if (session != null) try { session.close(); } catch (IOException closing) { error.addSuppressed(closing); }
+                throw error;
+            }
         }
 
         void becomeWriter(ChunkStore.Lease next) {
@@ -183,8 +185,17 @@ public final class StreamingWorld {
             writes.tick(this::capture, 16, TimeUnit.MILLISECONDS.toNanos(3));
         }
 
+        void sealNative(Chunk chunk, Projection projection) throws Exception {
+            if (projection.revision != 0) return;
+            ChunkKey key = new ChunkKey(chunk.xPosition, chunk.zPosition);
+            if (world.equals(Paths.get(binding.sourceWorld)) && projection.baselineEligible && store.baselineCovered(key) && !store.baselineRecorded(key)) {
+                projection.revision = saves.acceptBaseline(store, TerrainTransfer.capture(level, chunk, projection.residual));
+            } else if (!store.baselineRecorded(key)) store.markGenerated(key);
+            projection.baselineEligible = false;
+        }
+
         boolean sourceContains(ChunkKey key) throws IOException {
-            return NativeRegion.hasFullChunk(Paths.get(binding.sourceWorld), key);
+            return saves.sourceContains(binding, key);
         }
 
     }
@@ -199,6 +210,15 @@ public final class StreamingWorld {
     }
     static void cancelTravel(net.minecraft.entity.player.EntityPlayerMP player) {
         Context context=WORLDS.get(player.getServerForPlayer());if(context!=null)context.destination.close();
+    }
+
+    @cpw.mods.fml.common.eventhandler.SubscribeEvent
+    public void worldOpened(net.minecraftforge.event.world.WorldEvent.Load event) {
+        if (!(event.world instanceof WorldServer)) return;
+        WorldServer level = (WorldServer)event.world;
+        if (level.provider.dimensionId != 0 || net.minecraft.server.MinecraftServer.getServer().isDedicatedServer()) return;
+        StreamingMode.requireBoundWorld(level.getSaveHandler().getWorldDirectory().toPath());
+        context(level);
     }
 
     static boolean enabled(WorldServer level) {
@@ -219,14 +239,14 @@ public final class StreamingWorld {
         if (!cpw.mods.fml.common.FMLCommonHandler.instance().getEffectiveSide().isServer())
             throw new IOException("Authority lookup requires server side");
         if (context.detached.containsKey(key)) context.flushKey(key);
-        ChunkStore.Versioned value = context.store.read(key);
+        ChunkStore.Versioned value = context.reads.read(context.store, key);
         if (value == null && !context.world.equals(Paths.get(context.binding.sourceWorld)) && context.sourceContains(key)) {
             ChunkSnapshot source = SourceChunkRequests.fetch(Paths.get(context.binding.authority).resolve("requests"), context.binding.worldId, key, 30000);
-            value = context.store.read(key);
+            value = context.reads.read(context.store, key);
             if (value == null) {
                 if (context.lease == null) throw new IOException("Source did not commit requested terrain");
-                context.store.commit(context.lease, Collections.singletonList(new ChunkStore.Write(0, source)));
-                value = context.store.read(key);
+                context.saves.commit(context.store, context.lease, Collections.singletonList(new ChunkStore.Write(0, source)));
+                value = context.reads.read(context.store, key);
             }
         }
         return value;
@@ -241,16 +261,17 @@ public final class StreamingWorld {
             ChunkKey key = new ChunkKey(x, z);
             if (context.detached.containsKey(key)) context.flushKey(key);
             long revision = context.store.revision(key);
-            ChunkStore.Versioned value = revision == 0 ? canonical(context, key) : null;
-            if (revision == 0 && value == null) return null;
+            boolean regenerated = context.store.discarded(key);
+            ChunkStore.Versioned value = revision == 0 && !regenerated ? canonical(context, key) : null;
+            if (revision == 0 && value == null && !regenerated) return null;
             // Existing native entities are loaded by vanilla; beforeEntities replaces terrain first.
-            Chunk chunk = provider.currentChunkLoader.loadChunk(provider.worldObj, x, z);
+            Chunk chunk = regenerated ? provider.currentChunkProvider.provideChunk(x, z) : provider.currentChunkLoader.loadChunk(provider.worldObj, x, z);
             if (chunk == null) {
                 if (value == null) value = canonical(context, key);
                 chunk = new Chunk(provider.worldObj, x, z);
                 applyCanonical(context, chunk, value);
             }
-            chunk.isTerrainPopulated=true;
+            if (!regenerated) chunk.isTerrainPopulated=true;
             provider.loadedChunkHashMap.add(ChunkCoordIntPair.chunkXZ2Int(x, z), chunk);provider.loadedChunks.add(chunk);
             // Re-enter the already-loaded vanilla branch to cancel any queued unload.
             provider.loadChunk(x, z);
@@ -308,6 +329,7 @@ public final class StreamingWorld {
                 }
                 CompactUnknowns.load(chunk,data);
                 if (projection == null) projection = initialProjection(context.binding.worldId, key, context.legacyResidual);
+                projection.baselineEligible = context.world.equals(Paths.get(context.binding.sourceWorld));
                 context.projections.put(chunk, projection);
             }
         } catch (Exception error) { if (context != null) context.failure = error; throw new LoadFailure(error); }
@@ -330,7 +352,17 @@ public final class StreamingWorld {
         try {
             CompactUnknowns.save(event.getChunk(),event.getData().getCompoundTag("Level"));
             if (context == null) return;
-            context.drainChanges(); Projection projection = context.projections.get(event.getChunk());
+            Chunk chunk = event.getChunk(); ChunkKey key = new ChunkKey(chunk.xPosition, chunk.zPosition);
+            Projection projection = context.projections.get(chunk);
+            if (projection == null) {
+                projection = initialProjection(context.binding.worldId, key, context.legacyResidual);
+                context.projections.put(chunk, projection);
+                if (context.loaded.size() >= MAX_LOADED && !context.loaded.containsKey(key)) throw new IOException("Native resident chunk budget exhausted");
+                context.loaded.put(key, new Resident(chunk, projection));
+                if (context.writes != null) context.changed.add(key);
+            }
+            context.sealNative(chunk, projection);
+            context.drainChanges();
             if (projection != null) event.getData().getCompoundTag("Level").setString(PROJECTION, JSON.toJson(savedProjection(context, projection, new ChunkKey(event.getChunk().xPosition, event.getChunk().zPosition))));
         } catch (Exception error) { if (context != null) context.failure = error; throw new LoadFailure(error); }
     }
@@ -348,6 +380,7 @@ public final class StreamingWorld {
                 projection = initialProjection(context.binding.worldId, key, context.legacyResidual);
                 context.projections.put(chunk, projection);
             }
+            context.sealNative(chunk, projection);
             context.loaded.put(key, new Resident(chunk, projection));
             if (context.writes != null && projection.revision == 0) context.changed.add(key);
         } catch (Exception error) { context.failure = error; throw new LoadFailure(error); }
@@ -382,7 +415,7 @@ public final class StreamingWorld {
             } else {
                 ChunkStore.Lease owner = context.store.lease();
                 if (context.lease != null && owner.epoch == context.lease.epoch && owner.owner.equals(context.instance)) {
-                    long revision = context.store.commit(context.lease, Collections.singletonList(new ChunkStore.Write(0, captured)));
+                    long revision = context.saves.commit(context.store, context.lease, Collections.singletonList(new ChunkStore.Write(0, captured)));
                     if (resident != null) resident.projection.revision = revision;
                 }
             }
@@ -394,11 +427,10 @@ public final class StreamingWorld {
         Context context = context(level); if (context == null) return;
         if (!net.minecraft.server.MinecraftServer.getServer().getConfigurationManager().playerEntityList.isEmpty()) context.player = (net.minecraft.entity.player.EntityPlayerMP)net.minecraft.server.MinecraftServer.getServer().getConfigurationManager().playerEntityList.get(0);
         context.destination.tick();
-        if(context.exploration!=null)context.exploration.tick(context);
         ClientHooks.bridge().diagnostics.put("destination",context.destination.diagnostics());
         context.drainChanges();
         if (context.writes != null) context.writes.tick(context::capture, context.detached.isEmpty() ? 2 : 16, TimeUnit.MILLISECONDS.toNanos(3));
-        ClientHooks.bridge().diagnostics.put("streamingProtocol", 3);
+        ClientHooks.bridge().diagnostics.put("streamingProtocol", StreamingMode.PROTOCOL);
         ClientHooks.bridge().diagnostics.put("streamingWorldId", context.binding.worldId);
         ClientHooks.bridge().diagnostics.put("streamingBinding", context.world.resolve("epoch/authority.json").toString());
         ClientHooks.bridge().diagnostics.put("streamingLoaded", context.loaded.size());
@@ -428,8 +460,9 @@ public final class StreamingWorld {
     static void configureSnapshot(WorldServer level, Snapshot snapshot, double x, double z) {
         if (!enabled(level)) return;
         ChunkKey center = ChunkKey.at(x, z);
-        snapshot.x0 = Math.max(-30000000, Math.min(30000000 - snapshot.sizeX, center.x * 16 - 32));
-        snapshot.z0 = Math.max(-30000000, Math.min(30000000 - snapshot.sizeZ, center.z * 16 - 32));
+        snapshot.sizeX = snapshot.sizeZ = 16;
+        snapshot.x0 = center.x * 16;
+        snapshot.z0 = center.z * 16;
     }
 
     static String[] restoreBiomes(WorldServer level, Snapshot bounds, String[] nativeCells, WorldExtras.Carry legacy) throws Exception {
@@ -447,6 +480,29 @@ public final class StreamingWorld {
             }
         }
         return restored;
+    }
+
+
+    static boolean reuseTerrain(WorldServer level, Snapshot snapshot) throws Exception {
+        Context context = context(level); if (context == null) return false;
+        context.flush();
+        ChunkStore.Versioned content = context.store.read(new ChunkKey(snapshot.x0 / 16, snapshot.z0 / 16));
+        if (content == null) throw new IOException("Player terrain has not been committed");
+        ChunkSnapshot chunk = content.chunk;
+        snapshot.palette = chunk.palette; snapshot.runs = chunk.runs;
+        snapshot.blockEntities = chunk.blockEntities; snapshot.appearanceSources = chunk.appearanceSources;
+        snapshot.sourceInstance = chunk.sourceInstance;
+        return true;
+    }
+
+    static void writeCarry(WorldServer level, Path file, WorldExtras.Carry carry) throws IOException {
+        Context context = context(level);
+        if (context == null) WorldExtras.writeCarry(file, carry); else context.saves.writeCarry(file, carry);
+    }
+
+    static Snapshot readSnapshot(WorldServer level, Path snapshot) throws IOException {
+        Context context = context(level);
+        return context == null ? Snapshot.read(snapshot) : context.saves.read(snapshot);
     }
 
     static Path restart(WorldServer level) {
@@ -475,21 +531,17 @@ public final class StreamingWorld {
         if (context.writes == null || context.failure != null || context.restart != null || context.player == null) return;
         ChunkStore.Lease owner = context.store.lease();
         if (context.lease.epoch != owner.epoch || !context.instance.equals(owner.owner)) return;
-        context.flush();
         Snapshot snapshot = Handoff.instance.exportWorld(net.minecraft.server.MinecraftServer.getServer(), context.player);
-        // Capturing the player's neighborhood may load additional native chunks.
-        context.flush();
-        SavedWorld.publish(snapshot, context.binding, context.lease);
-        AutoRuntime.prepareSavedWorlds(context.world.resolve("epoch/authority.json"));
+        context.saves.submit(snapshot, context.binding, context.lease, context.store.checkpoint(context.lease));
     }
 
-    static void exported(WorldServer level, Path snapshot) throws Exception {
+    static void exported(WorldServer level, Snapshot data, Path snapshot) throws Exception {
         Context context = context(level);
-        if (context == null) { Files.deleteIfExists(StreamCheckpoint.path(snapshot)); return; }
+        if (context == null) { data.write(snapshot); Files.deleteIfExists(StreamCheckpoint.path(snapshot)); return; }
         if (context.writes == null) throw new IOException("Frozen standby cannot export as the authoritative writer");
         context.destination.close();
         context.flush(); context.writes.close(); context.writes = null;
-        StreamCheckpoint.publish(snapshot, context.binding, context.lease);
+        context.saves.export(data, snapshot, context.binding, context.lease, context.store.checkpoint(context.lease));
     }
 
     static void verifyImport(WorldServer level, Path snapshot) throws Exception {
@@ -499,27 +551,22 @@ public final class StreamingWorld {
             return;
         }
         if (context.writes != null) throw new IOException("Cannot overwrite a running authority writer");
-        context.imported = snapshot.equals(context.restart) ? SavedWorld.authorize(snapshot, context.binding, context.store)
-                : StreamCheckpoint.verify(snapshot, context.binding, context.store);
+        context.imported = context.saves.verify(snapshot, context.binding, context.store, snapshot.equals(context.restart));
         context.destination.close();
     }
 
     static void resume(WorldServer level) throws Exception {
         Context context = context(level); if (context == null) return;
         if (context.failure != null) throw new IOException("Streaming context requires recovery", context.failure);
-        ChunkStore.Lease owner = context.store.lease();
         if (context.writes != null) {
-            if (owner.epoch != context.lease.epoch || !owner.owner.equals(context.instance)) throw new IOException("Writer lease was revoked");
-            return;
+            WorldSession.requireWriter(context.store, context.lease, context.instance); return;
         }
-        long expected = context.imported != null ? context.imported.sourceEpoch : context.lease == null ? -1 : context.lease.epoch;
-        String previous = context.imported != null ? context.imported.sourceInstance : context.instance;
-        if (owner.epoch != expected || !owner.owner.equals(previous)) throw new IOException("Handoff ownership changed; refusing a second writer");
+        long expected = WorldSession.prepareResume(context.store, context.lease, context.imported, context.instance);
         for (Resident resident : new ArrayList<>(context.loaded.values())) {
             ChunkKey key = new ChunkKey(resident.chunk.xPosition, resident.chunk.zPosition);
             long latestRevision = context.store.revision(key);
             if (latestRevision == 0 || latestRevision == resident.projection.revision) continue;
-            ChunkStore.Versioned latest = context.store.read(key);
+            ChunkStore.Versioned latest = context.reads.read(context.store, key);
             if (latest == null) throw new IOException("Committed terrain disappeared during reconciliation");
             TerrainTransfer.Prepared prepared = TerrainTransfer.prepare(level, latest.chunk);
             context.applying = true;
@@ -529,217 +576,13 @@ public final class StreamingWorld {
             resident.chunk.func_150809_p();
         }
         // Lease publication is the handoff commit point. Everything above remains recoverable by the source.
-        context.becomeWriter(context.store.transfer(expected, context.instance)); context.imported = null;
+        context.becomeWriter(WorldSession.commitResume(context.store, expected, context.instance)); context.imported = null;
         for (Map.Entry<ChunkKey, Resident> entry : context.loaded.entrySet())
             if (entry.getValue().projection.revision == 0) context.changed.add(entry.getKey());
     }
 
     static void flush(WorldServer level) throws Exception {
         Context context = WORLDS.get(level); if (context != null) context.flush();
-    }
-
-    static Map<String,Object> selfTest(WorldServer level) throws Exception {
-        if (!Boolean.getBoolean("epoch.testHarness")) throw new IOException("Requires isolated test harness");
-        Context context = context(level); if (context == null) throw new IOException("Streaming disabled");
-
-        ChunkSnapshot empty = TerrainTransfer.capture(level, new Chunk(level, -102, 300), null);
-        if (empty.palette.size() != 1 || !empty.palette.get(0).equals(LegacyStates.encode(net.minecraft.init.Blocks.air, 0))
-                || empty.runs.length != 2 || empty.runs[0] != 0 || empty.runs[1] != ChunkSnapshot.VOLUME)
-            throw new IOException("Absent-section capture changed empty chunk contents");
-        Chunk source = level.getChunkFromChunkCoords(-101,300);
-        level.setBlock(-1612,64,4805,net.minecraft.init.Blocks.wool,0,2);
-        context.flush();
-        ChunkStore.Versioned beforeMetadata=context.store.read(new ChunkKey(-101,300));
-        if(!source.setBlockMetadata(4,64,5,14))throw new IOException("Metadata test did not change wool");
-        context.flush();
-        ChunkStore.Versioned afterMetadata=context.store.read(new ChunkKey(-101,300));
-        if(afterMetadata.revision<=beforeMetadata.revision || !afterMetadata.chunk.palette.contains(LegacyStates.encode(net.minecraft.init.Blocks.wool,14)))
-            throw new IOException("Metadata-only native edit was not committed");
-        level.setBlock(-1613,64,4805,net.minecraft.init.Blocks.chest,2,2);
-        net.minecraft.tileentity.TileEntityChest chest = (net.minecraft.tileentity.TileEntityChest)level.getTileEntity(-1613,64,4805);
-        chest.setInventorySlotContents(0,new net.minecraft.item.ItemStack(net.minecraft.init.Items.diamond,7)); chest.markDirty();
-        context.flush(); ChunkStore.Versioned first = context.store.read(new ChunkKey(-101,300));
-        if (first == null || first.chunk.blockEntities.isEmpty()) throw new IOException("Native dirty container not captured");
-        NBTTagCompound oldTile=new NBTTagCompound();chest.writeToNBT(oldTile);
-        NBTTagCompound stale=new NBTTagCompound(),nativeLevel=new NBTTagCompound();net.minecraft.nbt.NBTTagList oldTiles=new net.minecraft.nbt.NBTTagList();oldTiles.appendTag(oldTile);nativeLevel.setTag("TileEntities",oldTiles);stale.setTag("Level",nativeLevel);
-        level.setBlock(-1613,64,4805,net.minecraft.init.Blocks.gold_block,0,2);
-        ChunkKey key = new ChunkKey(-101,300);
-        Resident originalResident = context.loaded.get(key);
-        context.detach(key);
-        if (!context.detached.containsKey(key) || context.loaded.containsKey(key))
-            throw new IOException("Pending unload did not retain an independent snapshot");
-        Chunk restored = new Chunk(level,-101,300);
-        ((net.minecraft.world.chunk.storage.AnvilChunkLoader)((net.minecraft.world.gen.ChunkProviderServer)level.getChunkProvider()).currentChunkLoader).loadEntities(level,stale.getCompoundTag("Level"),restored);
-        ChunkStore.Versioned latest = context.store.read(key);
-        if (latest.revision <= first.revision || context.detached.containsKey(key) || context.writes.isPending(key))
-            throw new IOException("Immediate reload did not commit latest detached generation");
-        // Probe removed the adapter registry entry, not the native provider entry.
-        originalResident.projection.revision = latest.revision; context.loaded.put(key, originalResident);
-        if (restored.getBlock(3,64,5)!=net.minecraft.init.Blocks.gold_block || !restored.chunkTileEntityMap.isEmpty())
-            throw new IOException("Native deferred load did not replace stale terrain/container");
-        // Introduce an authority-only chunk where no native file exists, then use the real provider.
-        ChunkSnapshot remote = latest.chunk; remote.chunkX=-100;
-        context.store.commit(context.lease,Collections.singletonList(new ChunkStore.Write(0,remote)));
-        Chunk loaded = level.getChunkFromChunkCoords(-100,300);
-
-        if (loaded.getBlock(3,64,5)!=net.minecraft.init.Blocks.gold_block)
-            throw new IOException("Authority-only chunk regenerated instead of loading");
-        // Load the final corner of a native 2x2 through the authority path. Vanilla must
-        // still populate its waiting north-west neighbour, without repopulating the import.
-        remote.chunkX=702; remote.chunkZ=-700;
-        context.store.commit(context.lease,Collections.singletonList(new ChunkStore.Write(0,remote)));
-        Chunk waiting = level.getChunkFromChunkCoords(701,-701);
-        level.getChunkFromChunkCoords(702,-701);
-        level.getChunkFromChunkCoords(701,-700);
-        if (waiting.isTerrainPopulated) throw new IOException("Population fixture was already populated");
-        Chunk corner = level.getChunkFromChunkCoords(702,-700);
-        if (!waiting.isTerrainPopulated || corner.getBlock(3,64,5)!=net.minecraft.init.Blocks.gold_block)
-            throw new IOException("Authority load skipped native neighbour population or regenerated imported terrain");
-        net.minecraft.world.chunk.storage.AnvilChunkLoader loader=(net.minecraft.world.chunk.storage.AnvilChunkLoader)((net.minecraft.world.gen.ChunkProviderServer)level.getChunkProvider()).currentChunkLoader;
-        loader.saveChunk(level,loaded);
-        Object[] persisted=loader.loadChunk__Async(level,-100,300);
-        if(persisted==null||!((NBTTagCompound)persisted[1]).getCompoundTag("Level").hasKey(PROJECTION,8))
-            throw new IOException("Native save did not include authority projection");
-        net.minecraft.entity.player.EntityPlayerMP player=(net.minecraft.entity.player.EntityPlayerMP)cpw.mods.fml.common.FMLCommonHandler.instance().getMinecraftServerInstance().getConfigurationManager().playerEntityList.get(0);
-        double beforeX=player.posX,beforeY=player.posY,beforeZ=player.posZ;
-        int accepted=cpw.mods.fml.common.FMLCommonHandler.instance().getMinecraftServerInstance().getCommandManager().executeCommand(player,"epoch travel 128 80 128");
-        if(accepted!=1)throw new IOException("Travel command rejected");
-        CompletableFuture<Void> completion=context.destination.currentCompletion();
-        context.destination.tick();
-        if(((Number)context.destination.diagnostics().get("heldTickets")).intValue()==0)throw new IOException("No destination ticket retained");
-        int cancelled=cpw.mods.fml.common.FMLCommonHandler.instance().getMinecraftServerInstance().getCommandManager().executeCommand(player,"epoch travel cancel");
-        if(cancelled!=1||!completion.isCompletedExceptionally()
-                ||((Number)context.destination.diagnostics().get("heldTickets")).intValue()!=0
-                ||player.posX!=beforeX||player.posY!=beforeY||player.posZ!=beforeZ)
-            throw new IOException("Destination cancellation leaked tickets or moved player");
-        player.playerNetServerHandler.setPlayerLocation(-1596.5,66,4805.5,0,0);
-        Map<String,Object> report=new LinkedHashMap<>();report.put("worldId",context.binding.worldId);
-        report.put("nativeDirtyTracking",true);report.put("metadataDirtyTracking",true);report.put("staleNativeReplaced",true);report.put("pendingReloadRestored",true);report.put("destinationCancellationChecked",true);report.put("deletedContainerAbsent",true);
-        report.put("authorityNeighbourPopulation",true);
-        report.put("absentNativeRestored",true);report.put("projectionEmbedded",true);report.put("playerX",player.posX);report.put("playerZ",player.posZ);
-        return report;
-    }
-
-    private static final class Exploration {
-        final net.minecraft.entity.player.EntityPlayerMP player;
-        final ChunkKey origin = new ChunkKey(-100, 300);
-        final List<Double> intervals = new ArrayList<>();
-        final Map<String,List<Double>> phaseIntervals = new LinkedHashMap<>();
-        final Map<String,Map<String,Object>> phaseStarts = new LinkedHashMap<>();
-        final long started = System.nanoTime();
-        final boolean wasFlying, couldFly;
-        long previous = started, peakHeap;
-        int step, peakLoaded, peakDirty, missingAtPlayer;
-        boolean unloaded;
-        CompletableFuture<Void> destination;
-        int returnedAt = -1;
-        Exploration(net.minecraft.entity.player.EntityPlayerMP player) {
-            this.player = player; wasFlying = player.capabilities.isFlying; couldFly = player.capabilities.allowFlying;
-            player.capabilities.allowFlying = true; player.capabilities.isFlying = true; player.sendPlayerAbilities();
-        }
-        void tick(Context context) throws Exception {
-            long now = System.nanoTime(); double interval = (now - previous) / 1e6;
-            intervals.add(interval); previous = now;
-            String phase = step == 0 ? "start" : step <= 256 ? "outbound" : step <= 656 ? "waitForUnload" : returnedAt < 0 ? "prepareDestination" : "return";
-            phaseIntervals.computeIfAbsent(phase, ignored -> new ArrayList<>()).add(interval);
-            if (!phaseStarts.containsKey(phase)) {
-                Map<String,Object> start = new LinkedHashMap<>();
-                start.put("observedAtEpochMs", System.currentTimeMillis()); start.put("loaded", context.loaded.size());
-                start.put("dirty", context.writes == null ? 0 : context.writes.pendingCount()); start.put("detached", context.detached.size());
-                phaseStarts.put(phase, start);
-            }
-            peakLoaded = Math.max(peakLoaded, context.loaded.size());
-            peakDirty = Math.max(peakDirty, context.writes == null ? 0 : context.writes.pendingCount());
-            Runtime runtime = Runtime.getRuntime(); peakHeap = Math.max(peakHeap, runtime.totalMemory() - runtime.freeMemory());
-            step++;
-            if (step <= 256) player.playerNetServerHandler.setPlayerLocation(-1596.5 + step * 2, 80, 4805.5, 0, 0);
-            if (step <= 656) {
-                if (!context.loaded.containsKey(ChunkKey.at(player.posX, player.posZ))) missingAtPlayer++;
-                if (step > 256 && !context.loaded.containsKey(origin)) unloaded = true;
-            }
-            if (step == 657) {
-                if (!unloaded) throw new IOException("Exploration did not unload its origin chunk");
-                ChunkStore.Versioned saved = context.store.read(origin);
-                if (saved == null) throw new IOException("Exploration lost authority origin");
-                int accepted = cpw.mods.fml.common.FMLCommonHandler.instance().getMinecraftServerInstance().getCommandManager().executeCommand(
-                        player, "epoch travel -1596.5 66 4805.5");
-                if(accepted!=1) throw new IOException("Travel command was rejected");
-                destination = context.destination.currentCompletion();
-            }
-            if (destination != null && destination.isDone() && returnedAt < 0) {
-                destination.join(); returnedAt=step;
-                player.capabilities.isFlying=false; player.sendPlayerAbilities();
-            }
-            if (returnedAt >= 0 && step == returnedAt + 60) {
-                Map<String,Object> report = positionTest(context.level);
-                if (context.level.getBlock(-1597,64,4805)!=net.minecraft.init.Blocks.emerald_block)
-                    throw new IOException("Exploration return lost origin edit");
-                Collections.sort(intervals);
-                report.put("distanceBlocks", 512); report.put("originUnloaded", unloaded); report.put("editRestored", true);
-                report.put("scriptedMovement", "2 blocks per server tick, then prepared return teleport");
-                report.put("ticksWithoutResidentAtPlayer", missingAtPlayer);
-                report.put("tickIntervalP95Ms", intervals.get((int)Math.ceil(intervals.size() * .95) - 1));
-                report.put("tickIntervalP99Ms", intervals.get((int)Math.ceil(intervals.size() * .99) - 1));
-                report.put("tickIntervalMaxMs", intervals.get(intervals.size() - 1));
-                report.put("elapsedMs", (now - started) / 1e6); report.put("peakLoaded", peakLoaded);
-                report.put("peakDetached", context.peakDetached); report.put("peakDirty", peakDirty); report.put("peakHeapBytes", peakHeap);
-                Map<String,Object> phases = new LinkedHashMap<>();
-                for (Map.Entry<String,List<Double>> entry : phaseIntervals.entrySet()) {
-                    List<Double> values = entry.getValue(); Collections.sort(values);
-                    Map<String,Object> stats = new LinkedHashMap<>(phaseStarts.get(entry.getKey()));
-                    stats.put("samples", values.size()); stats.put("totalMs", values.stream().mapToDouble(Double::doubleValue).sum());
-                    stats.put("p95Ms", values.get((int)Math.ceil(values.size() * .95) - 1));
-                    stats.put("p99Ms", values.get((int)Math.ceil(values.size() * .99) - 1));
-                    stats.put("maxMs", values.get(values.size() - 1)); phases.put(entry.getKey(), stats);
-                }
-                report.put("phases", phases);
-                report.put("destination", context.destination.diagnostics());
-                report.put("complete", true);
-                player.capabilities.isFlying = wasFlying; player.capabilities.allowFlying = couldFly; player.sendPlayerAbilities();
-                context.exploration = null; ClientHooks.bridge().diagnostics.put("streamingExploration", report);
-            }
-        }
-    }
-
-    static void exploreTest(WorldServer level) throws Exception {
-        if (!Boolean.getBoolean("epoch.testHarness")) throw new IOException("Requires isolated test harness");
-        Context context = context(level);
-        if (context == null || context.exploration != null) throw new IOException("Exploration unavailable");
-        net.minecraft.entity.player.EntityPlayerMP player = (net.minecraft.entity.player.EntityPlayerMP)cpw.mods.fml.common.FMLCommonHandler.instance().getMinecraftServerInstance().getConfigurationManager().playerEntityList.get(0);
-        level.setBlock(-1597,64,4805,net.minecraft.init.Blocks.emerald_block,0,2);
-        context.exploration = new Exploration(player);
-        ClientHooks.bridge().diagnostics.put("streamingExploration", Collections.singletonMap("complete", false));
-    }
-
-    static Map<String,Object> positionTest(WorldServer level) throws Exception {
-        if (!Boolean.getBoolean("epoch.testHarness")) throw new IOException("Requires isolated test harness");
-        net.minecraft.entity.player.EntityPlayerMP player=(net.minecraft.entity.player.EntityPlayerMP)cpw.mods.fml.common.FMLCommonHandler.instance().getMinecraftServerInstance().getConfigurationManager().playerEntityList.get(0);
-        Map<String,Object> report=new LinkedHashMap<>();report.put("x",player.posX);report.put("y",player.posY);report.put("z",player.posZ);
-        report.put("underfoot",String.valueOf(net.minecraft.block.Block.blockRegistry.getNameForObject(level.getBlock((int)Math.floor(player.posX),(int)Math.floor(player.posY)-1,(int)Math.floor(player.posZ)))));
-        if(player.posY<64||player.posY>67)throw new IOException("Remote player did not land safely");return report;
-    }
-
-    static Map<String,Object> inspectTest(WorldServer level, boolean edit) throws Exception {
-        if (!Boolean.getBoolean("epoch.testHarness")) throw new IOException("Requires isolated test harness");
-        if(edit){level.setBlock(-1597,64,4805,net.minecraft.init.Blocks.emerald_block,0,2);level.setBlock(0,64,0,net.minecraft.init.Blocks.diamond_block,0,2);flush(level);}
-        Map<String,Object> report=positionTest(level);
-        report.put("marker",String.valueOf(net.minecraft.block.Block.blockRegistry.getNameForObject(level.getBlock(-1597,64,4805))));
-        report.put("origin",String.valueOf(net.minecraft.block.Block.blockRegistry.getNameForObject(level.getBlock(0,64,0))));
-        report.put("special",String.valueOf(net.minecraft.block.Block.blockRegistry.getNameForObject(level.getBlock(-1596,64,4805))));
-        net.minecraft.tileentity.TileEntity special=level.getTileEntity(-1596,64,4805);
-        if(special instanceof Epoch.UnknownTile)report.put("originalSpecial",((Epoch.UnknownTile)special).originalState);
-        return report;
-    }
-
-    static Map<String,Object> restoreTest(WorldServer level) throws Exception {
-        if (!Boolean.getBoolean("epoch.testHarness")) throw new IOException("Requires isolated test harness");
-        Context context=context(level);if(context==null)throw new IOException("Streaming disabled");
-        Chunk chunk=level.getChunkFromChunkCoords(-100,300);
-        if(chunk.getBlock(3,64,5)!=net.minecraft.init.Blocks.gold_block || level.getTileEntity(-1597,64,4805)!=null)
-            throw new IOException("Restart lost the saved block or resurrected a container");
-        Projection projection=context.projections.get(chunk);
-        if(projection==null||projection.revision<=0)throw new IOException("Restart did not restore authority projection");
-        Map<String,Object> report=positionTest(level);report.put("worldId",context.binding.worldId);report.put("restartRestored",true);return report;
     }
 
     public static void stopping() throws Exception {
@@ -754,12 +597,16 @@ public final class StreamingWorld {
     }
 
     public static void stopped() {
+        AutoRuntime.worldStopped();
+        ClientHooks.bridge().worldStopped();
+        ClientHooks.resetWorld(); Handoff.instance.resetWorld();
         CompactUnknowns.clear();
         synchronized (WORLDS) {
             for (Iterator<Map.Entry<WorldServer, Context>> it = WORLDS.entrySet().iterator(); it.hasNext();) {
                 Map.Entry<WorldServer, Context> entry = it.next();
-                entry.getValue().reads.shutdown();
-                try { entry.getValue().session.close(); } catch (IOException error) { throw new LoadFailure(error); }
+                try { entry.getValue().session.close(entry.getValue().saves, entry.getValue().reads); }
+                catch (IOException error) { ClientHooks.bridge().diagnostics.put("savedWorldError", error.toString()); }
+                WorldExtras.forgetCarry(entry.getValue().world.resolve("epoch/environment.json.gz"));
                 it.remove();
             }
         }

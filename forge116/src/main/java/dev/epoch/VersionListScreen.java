@@ -30,7 +30,7 @@ public final class VersionListScreen extends Screen {
    Button button=addButton(new Button(left,y,rowWidth-86,20,new StringTextComponent(font.plainSubstrByWidth(label,rowWidth-98)),b->choose(entry)));
    button.active=entry.supported&&!entry.current;
    Button warmup=addButton(new Button(left+rowWidth-80,y,80,20,new StringTextComponent(entry.warmupLabel()),b->warmup(entry)));
-   warmup.active=entry.canWarmup();
+   warmup.active=(entry.canWarmup() || entry.canRelease());
   }
   int bottom=height-28;
   Button previous=addButton(new Button(left,bottom,28,20,new StringTextComponent("<"),b->page(-visibleRows)));previous.active=first>0;

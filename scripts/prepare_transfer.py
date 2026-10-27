@@ -8,7 +8,7 @@ from pathlib import Path
 
 import level_nbt
 from epoch_instances import atomic_json
-from prepare_lab import create, native_generation, payload, s
+from save_format import create, native_generation, payload, s
 
 
 def _set_fields(compound, fields):

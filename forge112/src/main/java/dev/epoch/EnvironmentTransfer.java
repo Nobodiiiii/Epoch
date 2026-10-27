@@ -142,7 +142,7 @@ final class EnvironmentTransfer {
   p.connection.sendPacket(new SPacketUpdateHealth(p.getHealth(),p.getFoodStats().getFoodLevel(),p.getFoodStats().getSaturationLevel()));p.connection.sendPacket(new SPacketSetExperience(p.experience,p.experienceTotal,p.experienceLevel));
   for(PotionEffect effect:p.getActivePotionEffects())p.connection.sendPacket(new SPacketEntityEffect(p.getEntityId(),effect));
   p.connection.sendPacket(new SPacketEntityVelocity(p));
-  prepared.carry.playerOriginal=prepared.extra.player;prepared.carry.playerApplied=encode(exportPlayer(p));WorldExtras.writeCarry(carryPath(world),prepared.carry);
+  prepared.carry.playerOriginal=prepared.extra.player;prepared.carry.playerApplied=encode(exportPlayer(p));StreamingWorld.writeCarry(world,carryPath(world),prepared.carry);
   p.connection.sendPacket(new SPacketTimeUpdate(s.gameTime,s.dayTime,world.getGameRules().getBoolean("doDaylightCycle")));
   ClientHooks.bridge().diagnostics.put("environment",WorldExtras.diagnostics(prepared.carry));
  }

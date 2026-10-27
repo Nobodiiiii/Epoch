@@ -172,7 +172,7 @@ final class EnvironmentTransfer {
   for(MobEffectInstance effect:p.getActiveEffects())p.connection.send(new ClientboundUpdateMobEffectPacket(p.getId(),effect));
   p.connection.send(new ClientboundSetEntityMotionPacket(p));
   prepared.carry.playerOriginal=prepared.extra.player;prepared.carry.playerApplied=exportPlayer(p).toString();
-  WorldExtras.writeCarry(carryPath(server),prepared.carry);
+  StreamingWorld.writeCarry(level,carryPath(server),prepared.carry);
   p.connection.send(new ClientboundSetTimePacket(s.gameTime,s.dayTime,level.getGameRules().getBoolean(GameRules.RULE_DAYLIGHT)));
   Epoch.bridge().diagnostics.put("environment",WorldExtras.diagnostics(prepared.carry));
  }

@@ -40,6 +40,7 @@ final class TerrainTransfer {
         return (Map<BlockPos, CompoundTag>) pendingEntities.get(chunk);
     }
     static final class Prepared {
+        String cacheStamp;
         final ChunkSnapshot source;
         final BlockState[] cells;
         final Map<BlockPos, BlockEntity> entities;
@@ -165,7 +166,9 @@ final class TerrainTransfer {
         }
         Map<String, Holder<Biome>> biomes = EnvironmentTransfer.registry(level);
         String[] applied = BiomeCompatibility.project(source.biomes.expand(16384), 16, 64, 16, true, biomes.keySet());
-        return new Prepared(source, cells, entities, biomes, applied);
+        Prepared result = new Prepared(source, cells, entities, biomes, applied);
+        result.cacheStamp = ProjectionCache.stamp(Epoch.class, context.rules.fingerprint);
+        return result;
     }
 
     /** Caller must hold the chunk behind the load barrier and finish lighting before release. */

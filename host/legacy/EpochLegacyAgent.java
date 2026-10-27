@@ -28,6 +28,4 @@ public final class EpochLegacyAgent {
 
     private static native int install();
     static native long[] diagnostics();
-    static native long adoptForSmoke(long child);
-    static native void releaseSmokeParent(long parent);
 }

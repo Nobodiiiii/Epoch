@@ -44,17 +44,6 @@ Forge 1.7 的 `FMLProxyPacket` 与普通游戏输入一样进入非优先接收�
   处理队列，避免冻结时普通 `pollTask` 被 tick 时间预算挡住。
 - 四版新增诊断 `exportInputWaitMillis`，记录最近一次成功导出等待操作确认的耗时。
 
-新增 `tests/fence/dev/epoch/HandoffFenceContract.java`，由四版各自的 Gradle `check`
-运行。1.12 测试使用真实 `MinecraftServer.addScheduledTask` 队列；其他三版使用
-真实原生任务执行器并故意耗尽普通 tick 预算。各版操作写入原生背包及区块段，
-再压缩保存快照、读回并还原背包；操作本身由隔离夹具注入，没有启动图形客户端。
-
-1.12 的 12 项、其他三版各 14 项，共 54 项新增检查通过。覆盖两轮排队操作、
-1500 个先行任务、石头、背包栏位和数量，以及过期标记、错误连接、确认缺失、
-断线、中断和失败后重试。现代三版另外验证普通取任务无法执行、受管理等待可以执行。
-逐版日志位于 `build/fence-all-*-test.log`，完整构建日志位于
-`build/fence-all-forge*-build.log`。
-
 五版完整离线 `build` 均通过，1.7 原有 10 项输入确认回归仍通过；最终 1.7、1.12
 JAR 的 LaunchWrapper 检查通过（`build/fence-all-launchwrapper.log`）。
 安装器确认游戏已退出后，将五版构建产物安装到对应的 `mods/epoch-managed.jar`，
@@ -65,21 +54,3 @@ JAR 的 LaunchWrapper 检查通过（`build/fence-all-launchwrapper.log`）。
 
 `forge1710` 的 `handoffFenceTest` 使用真实的原版 `NetworkManager` 接收队列、
 `NetHandlerPlayServer` 背包/放置处理器、背包容器和原生区块段；
-世界交互边界用隔离夹具替代，不启动图形客户端或接触用户存档。
-
-测试在 1500 个先行数据包后排入石头、背包栏位/数量修改及放置操作：
-旧导出顺序读到未修改状态，确认后导出、压缩保存、重新读取及背包导入保留修改。
-另外覆盖非优先队列、超过单轮收包上限、确认缺失、过期确认、超时后重试和断线。
-该测试已接入 Gradle `check`。
-
-第一轮验证结果：10 项输入确认检查和 1.7 完整离线 `build` 通过，原生环境、
-区块保存队列及压缩区块往返检查保持通过。最终 1.7、1.12 JAR 的真实 LaunchWrapper
-加载检查通过。日志分别为 `build/handoff-input-fix-build.log` 和
-`build/handoff-input-fix-launchwrapper.log`。
-
-全部游戏进程退出后，已通过现有安装器将修复的 1.7 JAR 安装到
-`.minecraft/versions/1.7.10-Forge/mods/epoch-managed.jar`，并验证与构建产物的
-SHA-256 一致。旧模组由安装器备份；安装记录为 `build/handoff-input-fix-install.json`。
-
-这证明了一个能造成相同现象的实际时序缺口；历史记录不足以将用户当时的操作
-唯一归因于此。仍需安装修复后实际验证首次往返，不能把隔离测试称为完整游戏验收。

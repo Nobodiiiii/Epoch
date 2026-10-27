@@ -1,5 +1,5 @@
 """Validate every Windows-relevant LWJGL GLFW function-table symbol, without UI."""
-import argparse,ctypes,json,pathlib,re,subprocess,zipfile
+import argparse,ctypes,json,pathlib,re,subprocess,zipfile,sys
 here=pathlib.Path(__file__).resolve().parent
 root=here.parents[1]
 parser=argparse.ArgumentParser()
@@ -7,7 +7,9 @@ parser.add_argument('--dll',type=pathlib.Path,default=here/'epoch-glfw.dll')
 parser.add_argument('--output',type=pathlib.Path,default=here/'export-verification.json')
 args=parser.parse_args()
 dll=ctypes.CDLL(str(args.dll.resolve()))
-javap=r'C:\Program Files\Java\jdk-17.0.15.6-hotspot\bin\javap.exe'
+sys.path.insert(0,str(root/'scripts'))
+from runtime_config import java_home
+javap=str(java_home(17)/'bin/javap.exe')
 results={}
 for version in ('3.2.2','3.3.1'):
     jar=root/'.minecraft/libraries/org/lwjgl/lwjgl-glfw'/version/('lwjgl-glfw-'+version+'.jar')

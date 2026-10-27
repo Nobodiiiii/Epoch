@@ -177,7 +177,7 @@ final class EnvironmentTransfer {
   for(EffectInstance effect:p.getActiveEffects())p.connection.send(new SPlayEntityEffectPacket(p.getId(),effect));
   p.connection.send(new SEntityVelocityPacket(p));
   prepared.carry.playerOriginal=prepared.extra.player;prepared.carry.playerApplied=exportPlayer(p).toString();
-  WorldExtras.writeCarry(carryPath(server),prepared.carry);
+  StreamingWorld.writeCarry(level,carryPath(server),prepared.carry);
   p.connection.send(new SUpdateTimePacket(s.gameTime,s.dayTime,level.getGameRules().getBoolean(GameRules.RULE_DAYLIGHT)));
   ClientHooks.bridge().diagnostics.put("environment",WorldExtras.diagnostics(prepared.carry));
  }

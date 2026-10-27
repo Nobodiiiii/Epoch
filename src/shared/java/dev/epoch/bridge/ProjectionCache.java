@@ -7,57 +7,48 @@ import java.nio.file.*;
 import java.security.*;
 import java.util.*;
 
-/** A native cache is reusable only for the exact installed code and active conversion rules. */
+/** Installation publishes code identities; gameplay reads metadata once without hashing JARs. */
 public final class ProjectionCache {
     private static final Map<Class<?>,String> CODE = new HashMap<Class<?>,String>();
     private ProjectionCache() {}
 
     /** Null disables native reuse when the optional code fingerprint cannot be read. */
     public static String stamp(Class<?> adapter) throws IOException {
-        String code = code(adapter);
         // Rule errors still propagate: they affect conversion correctness, not only caching.
-        return code == null ? null : code + ":" + CompatibilityRules.load(CompatibilityRules.directory()).fingerprint;
+        return stamp(adapter, CompatibilityRules.load(CompatibilityRules.directory()).fingerprint);
+    }
+    public static String stamp(Class<?> adapter, String rulesVersion) {
+        String code = code(adapter); return code == null ? null : code + ":" + rulesVersion;
     }
 
     private static synchronized String code(Class<?> adapter) {
         if (CODE.containsKey(adapter)) return CODE.get(adapter);
         try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
             CodeSource source = adapter.getProtectionDomain().getCodeSource();
-            if (source == null || source.getLocation() == null) throw new IOException("Missing adapter code source");
+            if (source == null) throw new IOException("Missing adapter origin");
             URL url = source.getLocation();
-            // LaunchWrapper supplies the class resource's jar:file: URL as CodeSource.
-            // Resolve the physical archive without creating or relying on a zip filesystem.
-            if ("jar".equalsIgnoreCase(url.getProtocol()))
-                url = ((JarURLConnection) url.openConnection()).getJarFileURL();
-            Path location = Paths.get(url.toURI());
-            List<Path> files = new ArrayList<Path>();
-            if (Files.isDirectory(location)) {
-                try (java.util.stream.Stream<Path> paths = Files.walk(location)) {
-                    paths.filter(Files::isRegularFile).sorted().forEach(files::add);
+            if ("jar".equalsIgnoreCase(url.getProtocol())) url = ((JarURLConnection)url.openConnection()).getJarFileURL();
+            Path archive = Paths.get(url.toURI());
+            if (!Files.isRegularFile(archive)) throw new IOException("Install the adapter to enable native cache reuse");
+            Path mods = archive.getParent(), manifest = mods.resolve("epoch-projection.json");
+            if (Files.size(manifest) > 256 * 1024) throw new IOException("Oversized installation manifest");
+            com.google.gson.JsonObject installed = new com.google.gson.JsonParser().parse(
+                    new String(Files.readAllBytes(manifest), java.nio.charset.StandardCharsets.UTF_8)).getAsJsonObject();
+            com.google.gson.JsonObject files = installed.getAsJsonObject("files");
+            Set<String> actual = new HashSet<String>();
+            try (DirectoryStream<Path> jars = Files.newDirectoryStream(mods, "*.jar")) {
+                for (Path jar : jars) {
+                    String name = jar.getFileName().toString(); actual.add(name);
+                    com.google.gson.JsonObject entry = files.getAsJsonObject(name);
+                    if (entry == null || Files.size(jar) != entry.get("size").getAsLong()
+                            || Files.getLastModifiedTime(jar).toMillis() != entry.get("modified").getAsLong())
+                        throw new IOException("Installation changed; reinstall Epoch to refresh native cache identity");
                 }
-            } else {
-                files.add(location);
-                // Registry changes from another installed mod invalidate native projections too.
-                if (location.getParent() != null && location.getParent().getFileName() != null
-                        && location.getParent().getFileName().toString().equals("mods"))
-                    try (DirectoryStream<Path> jars = Files.newDirectoryStream(location.getParent(), "*.jar")) {
-                        for (Path jar : jars) if (!jar.equals(location)) files.add(jar);
-                    }
             }
-            Collections.sort(files);
-            byte[] buffer = new byte[8192];
-            for (Path file : files) try (InputStream input = Files.newInputStream(file)) {
-                digest.update(file.getFileName().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                int n; while ((n = input.read(buffer)) != -1) digest.update(buffer, 0, n);
-            }
-            for (String resource : new String[]{"/assets/epoch/legacy-blockstates.json", "/assets/epoch/compatibility/vanilla.json"})
-                try (InputStream input = adapter.getResourceAsStream(resource)) {
-                    if (input != null) { int n; while ((n = input.read(buffer)) != -1) digest.update(buffer, 0, n); }
-                }
-            StringBuilder hex = new StringBuilder();
-            for (byte value : digest.digest()) hex.append(String.format(Locale.ROOT, "%02x", value & 255));
-            String result = hex.toString(); CODE.put(adapter, result); return result;
+            if (actual.size() != files.entrySet().size() || !actual.contains(archive.getFileName().toString())) throw new IOException("Mod list changed");
+            String result = installed.get("fingerprint").getAsString();
+            if (!result.matches("[0-9a-f]{64}")) throw new IOException("Invalid installation fingerprint");
+            CODE.put(adapter, result); return result;
         } catch (Exception error) {
             // Recompute from authority normally; failure of an optimization must not stop loading.
             CODE.put(adapter, null);

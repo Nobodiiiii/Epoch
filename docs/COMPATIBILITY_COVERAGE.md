@@ -4,8 +4,6 @@
 
 现代版本遍历全部合法状态；旧版本统计去重后的可导出 metadata 表示，数量不能直接横向比较。
 
-“保留”表示使用未知方块保存数据；NBT、容器内容、多方块结构及邻居行为未在本报告中测试。
-
 | 来源 | 目标 | 状态总数 | 直接支持 | 规则/metadata 转换 | 需要保留 |
 |---|---|---:|---:|---:|---:|
 | 1.7.10 | 1.7.10 | 2649 | 0 | 2649 | 0 |
@@ -65,13 +63,3 @@
 | minecraft:polished_deepslate_stairs | missing_block | 80 |
 | minecraft:waxed_cut_copper_stairs | missing_block | 80 |
 | minecraft:waxed_exposed_cut_copper_stairs | missing_block | 80 |
-
-## 验证记录
-
-- 2026-10-02：五个适配器构建通过，25 组原生状态审计完整；同版本没有状态被拒绝。
-- 共享桥接测试、规则包边界测试、1.12.2 协议测试、1.7.10 NBT/metadata 测试通过；Python 回归测试 32 项通过。
-- 新增原生测试覆盖树叶和铁轨的含水边界、炼药锅 0–3 水位迁移，以及非法头颅占位名称。
-- 1.18.2/1.20.1 的无界面测试通过真实 Event API 预初始化 Forge 的两个网络事件监听列表；没有模拟方块注册表或跳过解码异常。
-- 未执行真实世界切换、容器与红石行为测试，也未验证第三方模组包。上述数字仅表示状态解码结果。
-
-复现：`scripts/audit_compatibility.ps1 -Offline`；完整原始 JSON 保留在本地构建目录。

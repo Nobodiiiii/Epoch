@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.security.MessageDigest;
 import java.util.*;
+import java.util.concurrent.*;
 
 /** Immutable, fail-closed rule set. Only explicitly equivalent state migrations are accepted. */
 public final class CompatibilityRules {
@@ -32,7 +33,12 @@ public final class CompatibilityRules {
         "when", "targetMods", "drop", "rename", "values", "add", "toBlock"));
     private final List<Rule> rules;
     public final String fingerprint;
-    private static final Map<String,CompatibilityRules> LOADED = new LinkedHashMap<String,CompatibilityRules>();
+    private static final ConcurrentMap<String,CompatibilityRules> LOADED = new ConcurrentHashMap<String,CompatibilityRules>();
+    private static final ConcurrentMap<String,IOException> FAILED = new ConcurrentHashMap<String,IOException>();
+    private static final ConcurrentMap<String,CompletableFuture<CompatibilityRules>> PENDING = new ConcurrentHashMap<String,CompletableFuture<CompatibilityRules>>();
+    private static final ExecutorService RELOADS = new ThreadPoolExecutor(1, 1, 0, TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue<Runnable>(4), task -> { Thread thread = new Thread(task, "Epoch compatibility reload"); thread.setDaemon(true); return thread; },
+            new ThreadPoolExecutor.AbortPolicy());
 
     private CompatibilityRules(List<Rule> input) throws IOException {
         List<Rule> copy = new ArrayList<Rule>();
@@ -87,47 +93,44 @@ public final class CompatibilityRules {
     }
 
     public static CompatibilityRules load(Path directory) throws IOException {
-        // Providers may compute rules dynamically. Cache file-only packs by their actual bytes,
-        // not timestamps, so editing a pack always invalidates state and projection caches.
-        try {
-            if (!ServiceLoader.load(BlockCompatibilityProvider.class).iterator().hasNext()) {
-                MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                if (Files.exists(directory) && !Files.isDirectory(directory)) throw new IOException("Invalid compatibility directory");
-                List<Path> files = new ArrayList<Path>();
-                if (Files.isDirectory(directory)) try (DirectoryStream<Path> paths = Files.newDirectoryStream(directory, "*.json")) {
-                    for (Path file : paths) files.add(file);
+        String key = directory.toAbsolutePath().normalize().toString();
+        CompatibilityRules published = LOADED.get(key);
+        if (published != null) return published;
+        IOException failure = FAILED.get(key); if (failure != null) throw failure;
+        return reload(directory, false);
+    }
+
+    /** Explicit update boundary: queries only consume the last successfully published rules. */
+    public static CompatibilityRules reload(Path directory) throws IOException {
+        return reload(directory, true);
+    }
+    private static CompatibilityRules reload(Path directory, boolean force) throws IOException {
+        final String key = directory.toAbsolutePath().normalize().toString();
+        CompletableFuture<CompatibilityRules> created = new CompletableFuture<CompatibilityRules>();
+        CompletableFuture<CompatibilityRules> pending = PENDING.putIfAbsent(key, created);
+        if (pending == null) {
+            pending = created;
+            try { RELOADS.execute(() -> {
+                try {
+                    CompatibilityRules loaded = force ? null : LOADED.get(key);
+                    if (loaded == null) loaded = loadUncached(directory);
+                    LOADED.put(key, loaded); FAILED.remove(key); created.complete(loaded);
+                } catch (Throwable failure) {
+                    FAILED.put(key, new IOException("Compatibility rules require an explicit reload after failure", failure));
+                    created.completeExceptionally(failure);
                 }
-                Collections.sort(files);
-                if (files.size() > 256) throw new IOException("Too many compatibility packs");
-                List<byte[]> contents = new ArrayList<byte[]>();
-                for (Path file : files) {
-                    if (Files.size(file) > 1024 * 1024) throw new IOException("Compatibility pack exceeds 1 MiB: " + file);
-                    digest.update(file.getFileName().toString().getBytes(StandardCharsets.UTF_8));
-                    byte[] bytes = Files.readAllBytes(file);
-                    if (bytes.length > 1024 * 1024) throw new IOException("Compatibility pack grew beyond 1 MiB: " + file);
-                    contents.add(bytes); digest.update(bytes);
-                }
-                String key = directory.toAbsolutePath().normalize() + ":" + Arrays.toString(digest.digest());
-                synchronized (LOADED) {
-                    CompatibilityRules found = LOADED.get(key); if (found != null) return found;
-                    List<Rule> rules = new ArrayList<Rule>(builtins().rules);
-                    for (int n = 0; n < contents.size(); n++) {
-                        try { rules.addAll(parse(new StringReader(new String(contents.get(n), StandardCharsets.UTF_8)))); }
-                        catch (Exception error) { throw new IOException("Invalid compatibility pack " + files.get(n) + ": " + error.getMessage(), error); }
-                    }
-                    if (rules.size() > 10000) throw new IOException("Too many compatibility rules");
-                    CompatibilityRules loaded = new CompatibilityRules(rules);
-                    if (LOADED.size() >= 4) LOADED.clear();
-                    LOADED.put(key, loaded); return loaded;
-                }
-            }
-        } catch (java.security.NoSuchAlgorithmException impossible) { throw new AssertionError(impossible); }
-        catch (ServiceConfigurationError error) { throw new IOException("Cannot load block compatibility provider", error); }
-        return loadUncached(directory);
+                finally { PENDING.remove(key, created); }
+            }); } catch (RejectedExecutionException full) { PENDING.remove(key, created); created.completeExceptionally(full); }
+        }
+        try { return pending.get(30, TimeUnit.SECONDS); }
+        catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException("Rule reload interrupted", error); }
+        catch (ExecutionException error) { throw new IOException("Rule reload failed: " + error.getCause().getMessage(), error.getCause()); }
+        catch (TimeoutException error) { throw new IOException("Rule reload has not finished; the published rules remain active", error); }
     }
 
     private static CompatibilityRules loadUncached(Path directory) throws IOException {
         List<Rule> rules = new ArrayList<Rule>(builtins().rules);
+        long bytes = 0, deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         if (Files.exists(directory)) {
             if (!Files.isDirectory(directory)) throw new IOException("Compatibility pack path is not a directory: " + directory);
             List<Path> files = new ArrayList<Path>();
@@ -137,6 +140,8 @@ public final class CompatibilityRules {
             Collections.sort(files);
             if (files.size() > 256) throw new IOException("Too many compatibility packs");
             for (Path path : files) {
+                bytes += Files.size(path);
+                if (bytes > 8 * 1024 * 1024 || System.nanoTime() >= deadline) throw new IOException("Compatibility pack budget exhausted");
                 if (Files.size(path) > 1024 * 1024) throw new IOException("Compatibility pack exceeds 1 MiB: " + path);
                 try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) { rules.addAll(parse(reader)); }
                 catch (Exception error) { throw new IOException("Invalid compatibility pack " + path + ": " + error.getMessage(), error); }

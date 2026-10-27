@@ -32,6 +32,7 @@ import org.lwjgl.glfw.GLFWNativeWin32;
 
 @Mod("epoch")
 public class Epoch {
+ private static final dev.epoch.bridge.PauseOverride focusPause = new dev.epoch.bridge.PauseOverride();
   public static final String VERSION = "1.20.1";
   static final DeferredRegister<Block> BLOCKS =
       DeferredRegister.create(ForgeRegistries.BLOCKS, "epoch");
@@ -81,7 +82,8 @@ public class Epoch {
               });
   static Epoch instance;
   private static BridgeFiles files;
-  private boolean frozen, announced, starting;
+  private volatile boolean frozen, announced;
+  private boolean starting;
   private volatile int renderTicks;
   private long heartbeatAt;
   private volatile long grabAfter;
@@ -156,6 +158,16 @@ public class Epoch {
     applied.get(10, java.util.concurrent.TimeUnit.SECONDS);
   }
 
+  void resetWorld() {
+    frozen = announced = false;
+    Minecraft.getInstance().execute(() -> {
+      Minecraft mc = Minecraft.getInstance();
+      mc.options.pauseOnLostFocus = focusPause.update(mc.options.pauseOnLostFocus, false);
+      heldPose = null; grabAfter = 0; previousNoGravity = null; renderTicks = 0;
+      if (frameCapture != null) frameCapture.cancel(false); frameCapture = null;
+    });
+  }
+
   static BridgeFiles bridge() {
     if (files == null)
       files =
@@ -177,7 +189,7 @@ public class Epoch {
     MinecraftForge.EVENT_BUS.addListener(this::clientTick);
     MinecraftForge.EVENT_BUS.addListener(this::renderTick);
     MinecraftForge.EVENT_BUS.addListener(this::commands);
-    MinecraftForge.EVENT_BUS.addListener(StreamingWorld::loaded);
+    MinecraftForge.EVENT_BUS.addListener(StreamingWorld::worldOpened); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::loaded);
     MinecraftForge.EVENT_BUS.addListener(StreamingWorld::unloaded);
     MinecraftForge.EVENT_BUS.addListener(StreamingWorld::playerSaved); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopping); MinecraftForge.EVENT_BUS.addListener(StreamingWorld::stopped);
   }
@@ -238,9 +250,11 @@ public class Epoch {
     Minecraft mc = Minecraft.getInstance();
     if (mc.isPaused() && bridge().needsWorldTick()) mc.setScreen(null);
     if (AutoRuntime.managed() && mc.getWindow().isFullscreen()) mc.getWindow().toggleFullScreen();
-    mc.options.pauseOnLostFocus = false;
+    mc.options.pauseOnLostFocus = focusPause.update(mc.options.pauseOnLostFocus, frozen || (AutoRuntime.managed() && !announced) || bridge().needsWorldTick());
+    if (Boolean.getBoolean("epoch.fixedView")) {
     mc.options.bobView().set(false);
     mc.options.fov().set(70);
+    }
     if (System.currentTimeMillis() - heartbeatAt > 250) {
       heartbeatAt = System.currentTimeMillis();
       if (mc.player != null && mc.getSingleplayerServer() != null) {
@@ -303,20 +317,7 @@ public class Epoch {
                   Minecraft.getInstance().execute(() -> Minecraft.getInstance().setScreen(new VersionListScreen()));
                   return 1;
                 }))
-                .then(
-                    net.minecraft.commands.Commands.literal("testsetup")
-                        .executes(
-                            c -> {
-                              testsetup(c.getSource().getServer());
-                              return 1;
-                            }))
-                .then(
-                    net.minecraft.commands.Commands.literal("probe")
-                        .executes(
-                            c -> {
-                              probe(c.getSource().getServer());
-                              return 1;
-                            })));
+);
   }
 
   void serverTick(TickEvent.ServerTickEvent e) {
@@ -329,7 +330,7 @@ public class Epoch {
         if (saved != null) {
           frozen = true;
           StreamingWorld.verifyImport(server.overworld(), saved);
-          importWorld(server, Snapshot.read(saved));
+          importWorld(server, StreamingWorld.readSnapshot(server.overworld(), saved));
           StreamingWorld.resume(server.overworld());
           StreamingWorld.restarted(server.overworld());
           frozen = false; grabAfter = System.currentTimeMillis() + 400;
@@ -402,15 +403,14 @@ public class Epoch {
           snapshot.z = camera[2];
           snapshot.yaw = (float) camera[3];
           snapshot.pitch = (float) camera[4];
-          snapshot.write(Paths.get(cmd.path));
-          StreamingWorld.exported(server.overworld(), Paths.get(cmd.path));
+          StreamingWorld.exported(server.overworld(), snapshot, Paths.get(cmd.path));
           bridge().status(cmd.id, "EXPORTED", "World snapshot committed; simulation frozen");
           break;
         case "import":
           frozen = true;
           bridge().clientReady = false;
           StreamingWorld.verifyImport(server.overworld(), Paths.get(cmd.path));
-          importWorld(server, Snapshot.read(Paths.get(cmd.path)));
+          importWorld(server, StreamingWorld.readSnapshot(server.overworld(), Paths.get(cmd.path)));
           synchronized (bridge()) {
             renderTicks = 0;
             bridge().clientReady = false;
@@ -426,15 +426,16 @@ public class Epoch {
               });
           bridge().status(cmd.id, "FROZEN", "Simulation frozen");
           break;
+        case "recoverresume":
         case "resume":
           StreamingWorld.resume(server.overworld());
           frozen = false;
           grabAfter = System.currentTimeMillis() + 400;
           bridge().status(cmd.id, "READY", "Simulation resumed");
           break;
-        case "testsetup":
-          testsetup(server);
-          bridge().status(cmd.id, "READY", "Lab prepared");
+        case "reloadrules":
+          CompatibilityRules.reload(CompatibilityRules.directory());
+          bridge().status(cmd.id, "RULES_RELOADED", "Compatibility rules published");
           break;
         case "registry":
           NativeStates.catalog(NativeStates.mods()).write(Paths.get(cmd.path));
@@ -444,31 +445,6 @@ public class Epoch {
           RegistryCatalog.writeJson(Paths.get(cmd.path + ".audit-" + VERSION + ".json"),
               NativeStates.context().audit(RegistryCatalog.read(Paths.get(cmd.path))));
           bridge().status(cmd.id, "STATES_AUDITED", "State audit written");
-          break;
-        case "probe":
-          probe(server);
-          bridge().status(cmd.id, "PROBED", "Probe available in diagnostics");
-          break;
-        case "streamtest":
-          bridge().diagnostics.put("streamingTest", StreamingWorld.selfTest(server.overworld()));
-          bridge().status(cmd.id, "STREAM_TESTED", "Native streaming checks passed in isolated test world");
-          break;
-        case "streamexplore":
-          StreamingWorld.exploreTest(server.overworld());
-          bridge().status(cmd.id, "STREAM_EXPLORING", "Scripted exploration running");
-          break;
-        case "streamposition":
-          bridge().diagnostics.put("streamingPosition", StreamingWorld.positionTest(server.overworld()));
-          bridge().status(cmd.id, "STREAM_POSITION", "Remote player collision verified");
-          break;
-        case "streaminspect":
-        case "streamedit":
-          bridge().diagnostics.put("streamingInspect", StreamingWorld.inspectTest(server.overworld(), "streamedit".equals(cmd.action)));
-          bridge().status(cmd.id, "STREAM_INSPECTED", "Native handoff terrain inspected");
-          break;
-        case "streamrestore":
-          bridge().diagnostics.put("streamingRestore", StreamingWorld.restoreTest(server.overworld()));
-          bridge().status(cmd.id, "STREAM_RESTORED", "Saved remote terrain and player restored after restart");
           break;
         case "usekey":
           if (frozen) throw new IllegalStateException("Cannot use the key while the client is frozen");
@@ -481,6 +457,11 @@ public class Epoch {
               KEY.get().use(mc.level, mc.player, InteractionHand.MAIN_HAND);
           });
           break;
+        case "leaveworld":
+          frozen = false;
+          Minecraft.getInstance().execute(() -> { Minecraft.getInstance().clearLevel(); Minecraft.getInstance().setScreen(new net.minecraft.client.gui.screens.TitleScreen()); });
+          bridge().status(cmd.id, "WORLD_LEFT", "World session exit requested");
+          break;
         case "shutdown":
           StreamingWorld.flush(server.overworld());
           frozen = false;
@@ -491,7 +472,7 @@ public class Epoch {
       }
     } catch (Exception ex) {
       if (!"select".equals(cmd.action) && !"catalog".equals(cmd.action)
-          && !"usekey".equals(cmd.action)) frozen = true;
+          && !"usekey".equals(cmd.action) && !"reloadrules".equals(cmd.action)) frozen = true;
       bridge().status(cmd.id, "ERROR", ex.toString());
     }
   }
@@ -529,6 +510,7 @@ public class Epoch {
     s.inventory = p.getInventory().save(new ListTag()).toString();
     s.selectedSlot = p.getInventory().selected;
     EnvironmentTransfer.capture(server,level,p,s);
+    if (StreamingWorld.reuseTerrain(level, s)) return s;
     Map<String, Integer> ids = new HashMap<>();
     Map<BlockState, String> encodedStates = new IdentityHashMap<>();
     BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
@@ -755,80 +737,6 @@ public class Epoch {
     return expected.equals(actual);
   }
 
-  void testsetup(MinecraftServer server) {
-    ServerLevel level = server.overworld();
-    for (int z = -12; z <= 12; z++)
-      for (int x = -12; x <= 12; x++) {
-        level.setBlock(new BlockPos(x, 63, z), Blocks.GRASS_BLOCK.defaultBlockState(), 2);
-        for (int y = 64; y <= 72; y++) {
-          BlockPos pos = new BlockPos(x, y, z);
-          level.removeBlockEntity(pos);
-          level.setBlock(pos, Blocks.AIR.defaultBlockState(), 2);
-        }
-      }
-    // Reset only the diagnostic fixture's dropped items when repeating setup.
-    for (net.minecraft.world.entity.item.ItemEntity item : level.getEntitiesOfClass(
-        net.minecraft.world.entity.item.ItemEntity.class,
-        new net.minecraft.world.phys.AABB(-12, 63, -12, 13, 74, 13))) item.discard();
-    level.setBlock(new BlockPos(0, 64, 3), Blocks.CHERRY_PLANKS.defaultBlockState(), 2);
-    level.setBlock(new BlockPos(1, 64, 3), Blocks.STONE.defaultBlockState(), 2);
-    level.setBlock(new BlockPos(2, 64, 3), Blocks.CHISELED_BOOKSHELF.defaultBlockState(), 2);
-    if (level.getBlockEntity(new BlockPos(2, 64, 3))
-        instanceof ChiseledBookShelfBlockEntity shelf) {
-      ItemStack book = new ItemStack(Items.WRITTEN_BOOK);
-      CompoundTag tag = book.getOrCreateTag();
-      tag.putString("title", "Epoch preserved payload");
-      tag.putString("author", "Epoch Lab");
-      ListTag pages = new ListTag();
-      pages.add(StringTag.valueOf("{\"text\":\"Across versions, this page survives.\"}"));
-      tag.put("pages", pages);
-      shelf.setItem(0, book);
-      shelf.setChanged();
-    }
-    level.setBlock(new BlockPos(-1, 64, 3), Blocks.CHEST.defaultBlockState(), 2);
-    if (level.getBlockEntity(new BlockPos(-1, 64, 3)) instanceof ChestBlockEntity chest) {
-      ItemStack sentinel = new ItemStack(Items.DIAMOND, 7);
-      sentinel.setHoverName(Component.literal("Epoch NBT sentinel"));
-      chest.setItem(0, sentinel);
-      chest.setChanged();
-    }
-    ServerPlayer p = server.getPlayerList().getPlayers().get(0);
-    p.teleportTo(level, 0.5, 64, -3.5, 0, 10);
-    p.setGameMode(net.minecraft.world.level.GameType.CREATIVE);
-    p.getInventory().setItem(0, new ItemStack(KEY.get()));
-    level.setDayTime(6000);
-    level
-        .getGameRules()
-        .getRule(net.minecraft.world.level.GameRules.RULE_DAYLIGHT)
-        .set(false, server);
-    level
-        .getGameRules()
-        .getRule(net.minecraft.world.level.GameRules.RULE_WEATHER_CYCLE)
-        .set(false, server);
-    level
-        .getGameRules()
-        .getRule(net.minecraft.world.level.GameRules.RULE_RANDOMTICKING)
-        .set(0, server);
-  }
-
-  void probe(MinecraftServer server) {
-    ServerLevel level = server.overworld();
-    bridge().diagnostics.put("itemEntityCount", level.getEntitiesOfClass(
-        net.minecraft.world.entity.item.ItemEntity.class,
-        new net.minecraft.world.phys.AABB(-32, 0, -32, 32, 256, 32)).size());
-    for (int x = -1; x <= 2; x++) {
-      BlockPos pos = new BlockPos(x, 64, 3);
-      bridge()
-          .diagnostics
-          .put("block_" + x, NbtUtils.writeBlockState(level.getBlockState(pos)).toString());
-      BlockEntity be = level.getBlockEntity(pos);
-      if (be != null) bridge().diagnostics.put("nbt_" + x, be.saveWithFullMetadata().toString());
-    }
-    ServerPlayer p = server.getPlayerList().getPlayers().get(0);
-    bridge()
-        .diagnostics
-        .put("camera", Arrays.asList(p.getX(), p.getY(), p.getZ(), p.getYRot(), p.getXRot()));
-  }
 
   public static class UnknownBlock extends BaseEntityBlock {
     UnknownBlock() {

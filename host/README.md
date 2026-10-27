@@ -26,18 +26,4 @@ Only one simulation may resume. Failed preparation leaves the source playable. A
 
 Files are beneath `<projectRoot>/.minecraft/epoch`:
 
-- `catalog.json`: session ID, source ID, and instances with stable IDs, labels, versions and support reasons.
-- `host-status.json`: `adoptedRoot`, `sessionId`, `rootInstanceId`, `activeInstanceId`, `activeVersion`, `sourcePID`, `hostHwnd`, `children`, `targetId`, `phase`, `error`, heartbeat milliseconds and ISO timestamp, and switch timings.
-- `control/<catalogId>/launch.json`: target `{argv,cwd}` launch manifest. The original source's control directory comes directly from its seed and may differ.
-- `control/<catalogId>/request.json`: item/list selection `{id,targetId}`. Requests require an explicit catalog target ID; there is no implicit version toggle in adopted mode.
-- `host-command.json`: local test command `{id,action:"switch",targetId}` or `{id,action:"shutdown"}`.
-- `session/snapshot.json.gz`: latest handoff snapshot.
-- `session/session.json`: last committed source/session/active-instance pointer. A fresh explicit adoption always starts from the user's current world, not a previous session's replica.
-- `prepare-<catalogId>.log`, `host.log`, and per-target `client-console.log`: diagnostics.
-- `evidence/before-switch.png`: the source-generated held frame.
-
 IPC commands `{id,action,path?}` remain `export`, `import`, `freeze`, `resume`, and `shutdown`; status replies correlate `commandId`. Import readiness must include actual rendered target readiness, not just server mutation completion. Source and target native window handles must come from `GLFWNativeWin32.glfwGetWin32Window`, not GLFW's opaque window pointer.
-
-The previous scripted two-instance Swing host is retained for development when `--adopt` is omitted. Its version-based control directories and automatic opposite-version test switch are legacy-only.
-
-Compilation verifies Java types, not actual input focus, rendering continuity, or successful live Minecraft handoff. Those require desktop game tests. The current single-player snapshot limitations still apply; selecting a new instance does not make arbitrary saves or all vanilla entities transferable.

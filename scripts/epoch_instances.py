@@ -161,6 +161,16 @@ def is_epoch(path):
             return any(isinstance(entry,dict) and entry.get('modid')=='epoch' for entry in entries)
     except (OSError,KeyError,ValueError,zipfile.BadZipFile):return False
 
+def publish_projection_manifest(mods):
+    """Hash archives only at the explicit installation boundary."""
+    files={}
+    for jar in sorted(mods.glob('*.jar')):
+        stat=jar.stat()
+        files[jar.name]={'size':stat.st_size,'modified':stat.st_mtime_ns//1_000_000,
+                         'sha256':hashlib.sha256(jar.read_bytes()).hexdigest()}
+    fingerprint=hashlib.sha256(json.dumps(files,sort_keys=True).encode()).hexdigest()
+    atomic_json(mods/'epoch-projection.json',{'schema':1,'files':files,'fingerprint':fingerprint})
+
 def install_adapter(root,entry,running=None):
     root=Path(root).resolve();game=Path(entry['gameDir']).resolve()
     if not entry['supported'] or not inside(game,root):raise ValueError('不允许向该实例部署模组')
@@ -176,6 +186,7 @@ def install_adapter(root,entry,running=None):
     old=[p for p in mods.glob('*.jar') if is_epoch(p)]
     if len(old)==1 and hashlib.sha256(old[0].read_bytes()).hexdigest()==digest:
         atomic_json(game/'epoch'/'adapter.json',{'version':entry['version'],'sha256':digest,'artifact':str(source),'installed':str(old[0])})
+        publish_projection_manifest(mods)
         return old[0]
     descriptor,temp_name=tempfile.mkstemp(prefix='epoch-install-',suffix='.tmp',dir=mods)
     temp=Path(temp_name);moved=[];installed=False
@@ -187,6 +198,7 @@ def install_adapter(root,entry,running=None):
         if destination.exists():raise FileExistsError('部署目标在安装过程中发生变化')
         temp.rename(destination);installed=True
         atomic_json(game/'epoch'/'adapter.json',{'version':entry['version'],'sha256':digest,'artifact':str(source),'installed':str(destination)})
+        publish_projection_manifest(mods)
         return destination
     except Exception:
         if installed:destination.unlink()

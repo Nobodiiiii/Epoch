@@ -5,7 +5,7 @@ import java.nio.channels.*;
 import java.nio.file.*;
 import java.util.*;
 
-/** Process-lifetime membership, independent of the persistent terrain writer generation. */
+/** World-scoped membership and shared ownership transitions, independent of process identity. */
 public final class WorldSession implements AutoCloseable {
     private final FileChannel channel;
     private final FileLock lock;
@@ -40,7 +40,44 @@ public final class WorldSession implements AutoCloseable {
         try { return channel.tryLock(); } catch (OverlappingFileLockException busy) { return null; }
     }
 
-    @Override public void close() throws IOException {
-        try { lock.release(); } finally { channel.close(); }
+    public static final class Startup {
+        public final Path restart;
+        public final ChunkStore.Lease writer;
+        private Startup(Path restart, ChunkStore.Lease writer) { this.restart = restart; this.writer = writer; }
+    }
+    /** Must be called while the opening instance holds this world's exclusive membership. */
+    public Startup initialize(WorldBinding binding, ChunkStore store, SavedWorld.Publisher saves, String instance, boolean joining) throws IOException {
+        if (joining) {
+            if (store.nativeBaseline() == null) throw new IOException("Source adapter has not established its native terrain boundary");
+            return new Startup(null, null);
+        }
+        Path saved = SavedWorld.latest(binding);
+        if (saved != null) { saves.restore(saved, binding, store); return new Startup(saved, null); }
+        saves.initializeBaseline(store, binding);
+        return new Startup(null, store.transfer(store.lease().epoch, instance));
+    }
+
+    public static void requireWriter(ChunkStore store, ChunkStore.Lease writer, String instance) throws IOException {
+        ChunkStore.Lease owner = store.lease();
+        if (writer == null || owner.epoch != writer.epoch || !owner.owner.equals(instance)) throw new IOException("Writer lease was revoked");
+    }
+    /** Native adapters prepare and light terrain after this check, before committing ownership. */
+    public static long prepareResume(ChunkStore store, ChunkStore.Lease writer, StreamCheckpoint imported, String instance) throws IOException {
+        long expected = imported != null ? imported.sourceEpoch : writer == null ? -1 : writer.epoch;
+        String previous = imported != null ? imported.sourceInstance : instance;
+        ChunkStore.Lease owner = store.lease();
+        if (owner.epoch != expected || !owner.owner.equals(previous)) throw new IOException("Handoff ownership changed; refusing a second writer");
+        return expected;
+    }
+    public static ChunkStore.Lease commitResume(ChunkStore store, long expected, String instance) throws IOException {
+        return store.transfer(expected, instance, System.getProperty("epoch.transactionId", ""));
+    }
+    public void close(SavedWorld.Publisher saves, AuthorityReads reads) throws IOException {
+        reads.close();
+        try { saves.close(); } finally { close(); }
+    }
+
+    @Override public synchronized void close() throws IOException {
+        try { if (lock.isValid()) lock.release(); } finally { channel.close(); }
     }
 }

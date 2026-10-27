@@ -126,11 +126,3 @@ META-INF/services/dev.epoch.bridge.BlockCompatibilityProvider
 
 结果写入 `mod-registry.json.audit-目标版本.json`。两个操作都不放置方块、不改
 存档；需要实例已经进入单人世界，让原有控制通道处理命令。
-
-对每个有规则的状态验证 A→B→A，并检查所有未匹配值、未知属性、错误模组
-版本和规则冲突。涉及库存、能量、流体、网络节点或多方块机器的，还必须用
-真实世界 fixture 检查 NBT 和行为。注册表审计不能代替这些测试。
-
-离线原版矩阵可运行 `scripts/audit_compatibility.ps1 -Offline`，结果位于
-`build/compatibility/REPORT.md` 和完整 JSON。该测试只 bootstrap 原版注册表，
-不能据此声称任意第三方模组已通过验证。

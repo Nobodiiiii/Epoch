@@ -41,21 +41,6 @@ restart an existing game session to load an updated build.
 
 Build and verify:
 
-```powershell
-./host/legacy/build.ps1 -Smoke
-```
-
-This compiles a Java 8 agent and MinGW x64 native guard, runs `LegacyMouseTest.c`,
-then exercises LWJGL 2.9.1 and 2.9.4 bindings with hidden OpenGL windows.
-The native regression uses real hidden HWND trees with controlled foreground,
-focus, visibility and ownership observations. It verifies foreground resolution,
-focus loss, hidden/foreign targets, blank/arrow cursor selection and default
-message fallback without changing the desktop cursor.
-The binding smoke test verifies the required input hooks, and that
-startup cannot set the visible style, and that adoption permits the child to
-show while its test parent remains hidden. No Minecraft client is started.
-Extracted test natives are kept inside `.minecraft/epoch/native-smoke`.
-
 Verified 2026-10-01: both bindings reported five mandatory hooks (`31`), OpenGL
 4.6, a hidden window before adoption, and successful rendering after adoption.
 

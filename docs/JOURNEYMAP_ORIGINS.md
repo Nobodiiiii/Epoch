@@ -51,19 +51,3 @@ by JourneyMap. Previous matching map mods are backed up under
 without touching running profiles. `scripts/build.ps1` runs this preparation too;
 its Gradle `-Offline` switch does not prohibit these downloads if the pinned cache
 has not yet been populated. JourneyMap API classes are not bundled into Epoch.
-
-## Validation
-
-All five adapter builds pass. Shared authority tests cover provenance surviving
-cross-version edits, legacy references retaining unknown provenance, negative
-coordinates, adjacent region merging, viewport isolation and bounded scans.
-Installer tests cover matching-mod replacement with backup, preservation of addons,
-refusing running profiles, and rollback after publication failure.
-
-All five profiles now have the pinned map/dependency JARs and matching Epoch builds,
-verified against their download/build hashes. A real 1.20.1 test client discovered
-`dev.epoch.EpochMapPlugin` and reported 841 origin chunks rendered as 29 overlays,
-with no map-origin error or viewport limit. Evidence is under
-`.minecraft/epoch/evidence/map-qa-32b5b22b19114f478a68ef9efd262f96/`.
-Visual QA was stopped at the user's request to prohibit computer-use. The complete
-visual appearance and other four versions' runtime integration remain unverified.

@@ -12,6 +12,8 @@ import java.lang.reflect.*;
 import java.util.concurrent.*;
 
 public final class ClientHooks {
+ private static final dev.epoch.bridge.PauseOverride focusPause = new dev.epoch.bridge.PauseOverride();
+ static void resetWorld(){execute(() -> {Minecraft mc=Minecraft.getMinecraft();mc.gameSettings.pauseOnLostFocus=focusPause.update(mc.gameSettings.pauseOnLostFocus,false);frozenPose=null;listClosePose=null;listCloseFrames=0;resumeAt=0;frames=0;terrainReadyLastFrame=false;if(capture!=null)capture.cancel(false);capture=null;});}
  private static BridgeFiles files;
  private static final ConcurrentLinkedQueue<Runnable> tasks=new ConcurrentLinkedQueue<Runnable>();
  private static volatile double[] frozenPose;
@@ -58,7 +60,8 @@ public final class ClientHooks {
    if(mc.isFullScreen())mc.toggleFullscreen();
    AutoRuntime.tick(mc.mcDataDir.toPath(),Epoch.VERSION,hwnd(),mc.getIntegratedServer().getFolderName(),mc.thePlayer.getGameProfile().getName(),mc.thePlayer.getGameProfile().getId().toString());
   }
-  mc.gameSettings.pauseOnLostFocus=false;mc.gameSettings.fovSetting=70;mc.gameSettings.viewBobbing=false;
+  mc.gameSettings.pauseOnLostFocus=focusPause.update(mc.gameSettings.pauseOnLostFocus,frozenPose!=null||Handoff.preparing()||bridge().needsWorldTick());
+  if(Boolean.getBoolean("epoch.fixedView")){mc.gameSettings.fovSetting=70;mc.gameSettings.viewBobbing=false;}
   if(resumeAt>0&&System.currentTimeMillis()>resumeAt){resumeAt=0;frozenPose=null;if(mc.currentScreen instanceof FreezeScreen)mc.displayGuiScreen(null);mc.setIngameFocus();}
   if(System.currentTimeMillis()-heartbeat>250){heartbeat=System.currentTimeMillis();if(mc.thePlayer!=null){bridge().diagnostics.put("clientCamera",pose(mc));bridge().diagnostics.put("clientSelectedSlot",mc.thePlayer.inventory.currentItem);bridge().diagnostics.put("clientFrozen",frozenPose!=null);}bridge().heartbeat();}
   if(!starting&&Boolean.getBoolean("epoch.autoStart")&&mc.currentScreen instanceof GuiMainMenu){starting=true;String name=System.getProperty("epoch.world","Epoch Lab");mc.launchIntegratedServer(name,name,null);}

@@ -37,11 +37,6 @@ The built-in pack also maps `dirt_path` to `grass_path` for 1.16.5 and the rever
 for 1.18.2/1.20.1. Legacy skull entries using Mojang's `%%FILTER_ME%%` sentinel
 are no longer exported as real block IDs; they retain raw legacy state.
 
-To add a migration, add a JSON rule or Java provider with explicit block/category,
-version and value boundaries. The normalized result must still pass destination
-registry validation. Test unchanged compatible states, safe round trips,
-unsupported cases, and mod/version boundaries before widening a rule.
-
 ## Diagnostics
 
 Each modern import replaces `diagnostics.blockStateCompatibility` in the IPC
@@ -66,8 +61,3 @@ compatibility is checked separately and may still require placeholders.
 to 32 state/reason examples separately.
 `diagnostics.unknownBlocks` remains the total number of placeholder positions
 from the completed import.
-
-Run `tests/test_shared.ps1` for compatibility and existing shared bridge tests.
-Build the three modern adapter modules to verify integration with their
-respective Minecraft registries and APIs. The shared tests use representative
-property schemas; they do not start game clients.

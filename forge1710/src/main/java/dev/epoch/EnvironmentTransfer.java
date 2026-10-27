@@ -144,7 +144,7 @@ final class EnvironmentTransfer {
   p.playerNetServerHandler.sendPacket(new S06PacketUpdateHealth(p.getHealth(),p.getFoodStats().getFoodLevel(),p.getFoodStats().getSaturationLevel()));p.playerNetServerHandler.sendPacket(new S1FPacketSetExperience(p.experience,p.experienceTotal,p.experienceLevel));
   for(Object value:p.getActivePotionEffects())p.playerNetServerHandler.sendPacket(new S1DPacketEntityEffect(p.getEntityId(),(PotionEffect)value));
   p.playerNetServerHandler.sendPacket(new S12PacketEntityVelocity(p));
-  prepared.carry.playerOriginal=prepared.extra.player;prepared.carry.playerApplied=encode(exportPlayer(p));WorldExtras.writeCarry(carryPath(world),prepared.carry);
+  prepared.carry.playerOriginal=prepared.extra.player;prepared.carry.playerApplied=encode(exportPlayer(p));StreamingWorld.writeCarry(world,carryPath(world),prepared.carry);
   p.playerNetServerHandler.sendPacket(new S03PacketTimeUpdate(s.gameTime,s.dayTime,world.getGameRules().getGameRuleBooleanValue("doDaylightCycle")));
   ClientHooks.bridge().diagnostics.put("environment",WorldExtras.diagnostics(prepared.carry));
  }

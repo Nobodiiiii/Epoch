@@ -75,6 +75,7 @@ public class EpochHost {
     volatile BufferedImage held; volatile boolean closing; HWND host,viewport;
     volatile String active="1.20.1",phase="STARTING";
     String lastRequest="",lastHostCommand="";
+    String transactionId="";
     long switchMillis,exportMillis,importRenderMillis,revealResumeMillis; String error="";
     EpochHost(Path root){this(root,true);}
     EpochHost(Path root,boolean legacy){
@@ -99,7 +100,10 @@ public class EpochHost {
     }
     void write(Path p,JsonObject data)throws Exception{
         Files.createDirectories(p.getParent()); Path temp=p.resolveSibling(p.getFileName()+".host.tmp");
-        Files.writeString(temp,gson.toJson(data));
+        try(java.nio.channels.FileChannel output=java.nio.channels.FileChannel.open(temp,StandardOpenOption.CREATE,StandardOpenOption.TRUNCATE_EXISTING,StandardOpenOption.WRITE)){
+            java.nio.ByteBuffer bytes=java.nio.charset.StandardCharsets.UTF_8.encode(gson.toJson(data));
+            while(bytes.hasRemaining())output.write(bytes);output.force(true);
+        }
         for(int attempt=0;;attempt++){
             try{
                 try{Files.move(temp,p,StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE);}catch(AtomicMoveNotSupportedException e){Files.move(temp,p,StandardCopyOption.REPLACE_EXISTING);}
@@ -165,7 +169,9 @@ public class EpochHost {
             if(!alive(v))throw new IllegalStateException(v+" exited");
             try{
                 JsonObject s=read(control(v).resolve("status.json"));
-                if(id==null||s.has("commandId")&&id.equals(s.get("commandId").getAsString())){
+                if((sessionIdentity().isEmpty()||s.has("sessionId")&&sessionIdentity().equals(s.get("sessionId").getAsString()))
+                        &&(worldIdentity().isEmpty()||s.has("worldId")&&worldIdentity().equals(s.get("worldId").getAsString()))
+                        &&(id==null||s.has("commandId")&&id.equals(s.get("commandId").getAsString()))){
                     String state=s.get("phase").getAsString();
                     if(state.equals("ERROR"))throw new IllegalStateException(v+": "+s);
                     boolean needsRenderedClient=id==null || state.equals("IMPORTED");
@@ -178,15 +184,21 @@ public class EpochHost {
         throw new TimeoutException(v+" waiting for "+phases);
     }
     String command(String v,String action,Path path)throws Exception{
-        String id=UUID.randomUUID().toString();JsonObject j=new JsonObject();j.addProperty("id",id);j.addProperty("action",action);if(path!=null)j.addProperty("path",path.toString());write(control(v).resolve("command.json"),j);log(v+" "+action+" "+id);return id;
+        return command(v,action,path,transactionId);
+    }
+    String command(String v,String action,Path path,String boundary)throws Exception{
+        String id=boundary.isEmpty()?UUID.randomUUID().toString():boundary+"-"+v+"-"+action;
+        JsonObject j=new JsonObject();j.addProperty("id",id);j.addProperty("action",action);j.addProperty("transactionId",boundary);
+        if(this instanceof Adopted){Adopted adopted=(Adopted)this;j.addProperty("sessionId",adopted.sessionId);j.addProperty("worldId",adopted.worldId);}
+        if(path!=null)j.addProperty("path",path.toString());write(control(v).resolve("command.json"),j);log(v+" "+action+" "+id);return id;
     }
     void action(String v,String action,String expected)throws Exception{waitFor(v,command(v,action,null),Set.of(expected),20000);}
     void validateStreamingPair(String source,String target)throws Exception{
         JsonObject a=read(control(source).resolve("status.json")),b=read(control(target).resolve("status.json"));
         JsonObject ad=a.has("diagnostics")?a.getAsJsonObject("diagnostics"):new JsonObject();
         JsonObject bd=b.has("diagnostics")?b.getAsJsonObject("diagnostics"):new JsonObject();
-        boolean streamA=ad.has("streamingProtocol")&&ad.get("streamingProtocol").getAsInt()==3;
-        boolean streamB=bd.has("streamingProtocol")&&bd.get("streamingProtocol").getAsInt()==3;
+        boolean streamA=ad.has("streamingProtocol")&&ad.get("streamingProtocol").getAsInt()==5;
+        boolean streamB=bd.has("streamingProtocol")&&bd.get("streamingProtocol").getAsInt()==5;
         if(streamA!=streamB)throw new IllegalStateException("Both adapters must support the active streaming authority");
         if(streamA&&(!ad.has("streamingWorldId")||!bd.has("streamingWorldId")||!ad.get("streamingWorldId").equals(bd.get("streamingWorldId"))))
             throw new IllegalStateException("Instances are attached to different world authorities");
@@ -200,37 +212,112 @@ public class EpochHost {
         HWND h=windows.get(active);User32.INSTANCE.ShowWindow(h,0);canvas.repaint();
     }
     void reveal(){for(var entry:windows.entrySet())if(!entry.getKey().equals(active))User32.INSTANCE.ShowWindow(entry.getValue(),0);HWND h=windows.get(active);resize();User32.INSTANCE.ShowWindow(h,5);held=null;focus();SwingUtilities.invokeLater(()->frame.setTitle("Epoch — "+active));}
+    interface Preparation { void run() throws Exception; }
+    String sessionIdentity(){return "";}
+    String worldIdentity(){return "";}
+    void stopStandby(String id)throws Exception{
+        Process process=processes.get(id);if(process==null)return;
+        command(id,"shutdown",null);
+        if(!process.waitFor(12,TimeUnit.SECONDS)){process.destroy();if(!process.waitFor(3,TimeUnit.SECONDS))process.destroyForcibly();}
+        if(!process.waitFor(3,TimeUnit.SECONDS))throw new IllegalStateException("Standby did not exit: "+id);
+        windows.remove(id);
+    }
     void switchVersion()throws Exception{
-        String source=active,target=source.equals("1.20.1")?"1.16.5":"1.20.1";long start=System.nanoTime();exportMillis=importRenderMillis=revealResumeMillis=0;phase="SWITCHING";error="";status();
+        performHandoff(active.equals("1.20.1")?"1.16.5":"1.20.1",()->{});
+    }
+    /** One state machine for adopted and coordinator-owned windows; the lease decides recovery. */
+    void performHandoff(String target,Preparation preparation)throws Exception{
+        if(!phase.equals("READY"))throw new IllegalStateException("A handoff or recovery is already in progress");
+        if(target.equals(active))return;
+        String source=active;boolean frozen=false,committed=false,resumeRequested=false;
+        Path authority=null,snapshot=epoch.resolve("session/"+UUID.randomUUID()+".json.gz");
+        long expectedEpoch=-1;
+        transactionId=UUID.randomUUID().toString();
+        JsonObject transaction=new JsonObject();transaction.addProperty("schema",1);
+        transaction.addProperty("transactionId",transactionId);transaction.addProperty("sessionId",sessionIdentity());
+        transaction.addProperty("worldId",worldIdentity());transaction.addProperty("source",source);transaction.addProperty("target",target);
+        transaction.addProperty("snapshot",snapshot.toString());transaction.addProperty("stage","PREPARING");
+        phase="PREPARING";error="";
         try{
+            write(epoch.resolve("session/transaction.json"),transaction);status();preparation.run();
             validateStreamingPair(source,target);
-            Path snapshot=epoch.resolve("session/snapshot.json.gz");Files.createDirectories(snapshot.getParent());
-            // Source remains visible while its own render thread captures the
-            // framebuffer and freezes the camera. Never capture desktop pixels.
-            Files.deleteIfExists(control(source).resolve("frozen.png"));
-            waitFor(source,command(source,"export",snapshot),Set.of("EXPORTED"),30000);
-            exportMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-start);
-            freezeFrame(source);
-            long importStarted=System.nanoTime();
-            waitFor(target,command(target,"import",snapshot),Set.of("IMPORTED"),30000);
-            importRenderMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-importStarted);
-            // Target is still frozen but has rendered the imported scene.
-            // Focus the visible child before resume so it can grab the mouse.
-            long revealStarted=System.nanoTime();active=target;reveal();action(target,"resume","READY");saveSession();revealResumeMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-revealStarted);switchMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-start);phase="READY";status();log("Switch committed "+source+" -> "+target+" in "+switchMillis+" ms (export="+exportMillis+", import/render="+importRenderMillis+", reveal/resume="+revealResumeMillis+")");
-        }catch(Exception failure){
-            if(closing)throw new CancellationException("Host closing during switch");
-            error=failure.toString();log("Switch failed: "+error);
-            // Do not let a failed target freeze prevent the source from recovering.
-            // If its state cannot be established, terminate only our target process
-            // before resuming the source, so two simulations never run together.
-            try{action(target,"freeze","FROZEN");}catch(Exception targetFailure){
-                log("Target state uncertain; stopping target before rollback: "+targetFailure);
-                Process targetProcess=processes.get(target);targetProcess.destroy();
-                if(!targetProcess.waitFor(3,TimeUnit.SECONDS)){targetProcess.destroyForcibly();targetProcess.waitFor(3,TimeUnit.SECONDS);}
-                if(targetProcess.isAlive()){phase="ERROR";error+="; cannot stop target for safe rollback";status();return;}
+            JsonObject diagnostics=read(control(source).resolve("status.json")).getAsJsonObject("diagnostics");
+            if(diagnostics!=null&&diagnostics.has("streamingBinding")){
+                JsonObject binding=read(Path.of(diagnostics.get("streamingBinding").getAsString()));
+                if(!worldIdentity().isEmpty()&&!worldIdentity().equals(binding.get("worldId").getAsString()))
+                    throw new IllegalStateException("World session changed before handoff");
+                authority=Path.of(binding.get("authority").getAsString()).resolve("world.json");
+                JsonObject owner=read(authority);
+                if(!source.equals(owner.get("owner").getAsString()))throw new IllegalStateException("Source no longer owns authority");
+                expectedEpoch=owner.get("epoch").getAsLong();transaction.addProperty("sourceEpoch",expectedEpoch);
+                transaction.addProperty("authority",authority.toString());
             }
-            try{active=source;reveal();action(source,"resume","READY");saveSession();phase=processes.get(target).isAlive()?"READY":"DEGRADED";}catch(Exception rollback){phase="ERROR";error+="; rollback: "+rollback;}
-            status();
+            phase="SWITCHING";status();long started=System.nanoTime();exportMillis=importRenderMillis=revealResumeMillis=0;
+            transaction.addProperty("stage","EXPORTING");write(epoch.resolve("session/transaction.json"),transaction);
+            Files.createDirectories(snapshot.getParent());Files.deleteIfExists(control(source).resolve("frozen.png"));frozen=true;
+            waitFor(source,command(source,"export",snapshot),Set.of("EXPORTED"),30000);freezeFrame(source);
+            exportMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-started);long importing=System.nanoTime();
+            transaction.addProperty("stage","IMPORTING");write(epoch.resolve("session/transaction.json"),transaction);
+            waitFor(target,command(target,"import",snapshot),Set.of("IMPORTED"),30000);
+            importRenderMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-importing);long revealing=System.nanoTime();
+            transaction.addProperty("stage","COMMITTING");write(epoch.resolve("session/transaction.json"),transaction);
+            resumeRequested=true;action(target,"resume","READY");committed=true;
+            active=target;reveal();saveSession();
+            transaction.addProperty("stage","COMMITTED");transaction.addProperty("owner",target);write(epoch.resolve("session/transaction.json"),transaction);
+            revealResumeMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-revealing);switchMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-started);
+            phase="READY";log("Handoff committed "+source+" -> "+target+" in "+switchMillis+" ms");
+        }catch(Exception failure){
+            error=failure.toString();log("Handoff failed: "+error);
+            if(authority!=null&&expectedEpoch>=0){
+                JsonObject owner;
+                try{owner=read(authority);}catch(Exception unreadable){phase="RECOVERY_REQUIRED";error+="; durable ownership is unavailable: "+unreadable;return;}
+                String holder=owner.get("owner").getAsString();long epochValue=owner.get("epoch").getAsLong();
+                committed=target.equals(holder)&&epochValue==expectedEpoch+1&&owner.has("transactionId")&&transactionId.equals(owner.get("transactionId").getAsString());
+                if(!committed&&(!source.equals(holder)||epochValue!=expectedEpoch)){phase="RECOVERY_REQUIRED";error+="; durable owner changed unexpectedly";return;}
+            }else if(resumeRequested&&!committed){
+                phase="RECOVERY_REQUIRED";error+="; snapshot-only resume outcome requires recovery";return;
+            }
+            if(committed){
+                active=target;transaction.addProperty("stage","COMMITTED");transaction.addProperty("owner",target);
+                try{action(target,"recoverresume","READY");reveal();saveSession();write(epoch.resolve("session/transaction.json"),transaction);phase="READY";}
+                catch(Exception recovery){phase="RECOVERY_REQUIRED";error+="; committed target requires recovery: "+recovery;}
+                return;
+            }
+            if(closing||!alive(source)){phase="RECOVERY_REQUIRED";return;}
+            if(frozen){
+                if(alive(target))try{action(target,"freeze","FROZEN");}catch(Exception unknown){
+                    try{stopStandby(target);}catch(Exception unstoppable){phase="RECOVERY_REQUIRED";error+="; cannot establish a frozen standby: "+unstoppable;return;}
+                }
+                // A delayed resume may commit while the host is waiting for the freeze reply.
+                // Re-read ownership only after the target is quiescent, before touching the source.
+                if(authority!=null){
+                    JsonObject owner;
+                    try{owner=read(authority);}catch(Exception unavailable){phase="RECOVERY_REQUIRED";error+="; cannot determine ownership after target freeze: "+unavailable;return;}
+                    long epochValue=owner.get("epoch").getAsLong();String holder=owner.get("owner").getAsString();
+                    if(target.equals(holder)&&epochValue==expectedEpoch+1&&owner.has("transactionId")&&transactionId.equals(owner.get("transactionId").getAsString())){
+                        active=target;transaction.addProperty("stage","COMMITTED");transaction.addProperty("owner",target);
+                        write(epoch.resolve("session/transaction.json"),transaction);
+                        try{action(target,"recoverresume","READY");reveal();saveSession();phase="READY";}
+                        catch(Exception recovery){phase="RECOVERY_REQUIRED";error+="; committed target requires recovery: "+recovery;}
+                        return;
+                    }
+                    if(!source.equals(holder)||epochValue!=expectedEpoch){phase="RECOVERY_REQUIRED";error+="; ownership changed during rollback preparation";return;}
+                }
+                // Only an unchanged source lease can use the pre-commit rollback path.
+                transaction.addProperty("stage","ROLLING_BACK");write(epoch.resolve("session/transaction.json"),transaction);
+                action(source,"resume","READY");active=source;reveal();saveSession();
+            }
+            transaction.addProperty("stage","ABORTED");write(epoch.resolve("session/transaction.json"),transaction);phase="READY";
+        }finally{
+            String stage=transaction.get("stage").getAsString();
+            if(phase.equals("READY")&&(stage.equals("COMMITTED")||stage.equals("ABORTED"))){
+                Files.deleteIfExists(snapshot.resolveSibling(snapshot.getFileName()+".authority.json"));Files.deleteIfExists(snapshot);
+                if(authority!=null){
+                    String pin=UUID.nameUUIDFromBytes(snapshot.toAbsolutePath().normalize().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+                    Files.deleteIfExists(authority.getParent().resolve("pins").resolve(pin+".json"));
+                }
+            }
+            transactionId="";status();
         }
     }
     void run()throws Exception{
@@ -270,17 +357,28 @@ public class EpochHost {
             JsonObject state(String id)throws Exception;
             String freeze(String id,JsonObject ready)throws Exception;
             void abort(String id);
+            default boolean protectedInstance(String id){return false;}
         }
         static final class Job {
-            final String id;String phase="PREPARING",error="",commandId;long deadline;Process helper;
+            final String id;String phase="PREPARING",error="",commandId;long deadline,readyAt;Process helper;
             Job(String id){this.id=id;}
-            boolean pending(){return !phase.equals("READY")&&!phase.equals("FAILED");}
+            boolean pending(){return !phase.equals("READY")&&!phase.equals("FAILED")&&!phase.equals("RELEASED");}
         }
         final Driver driver;final Map<String,Job> jobs=new LinkedHashMap<>();
+        final int maxInstances=Math.max(1,Math.min(4,Integer.getInteger("epoch.warmup.maxInstances",2)));
+        final long idleMillis=Math.max(1000,Long.getLong("epoch.warmup.idleMillis",180000L));
         Warmups(Driver driver){this.driver=driver;}
         Job request(String id,long now){
             Job prior=jobs.get(id);
             if(prior!=null&&(prior.pending()||prior.phase.equals("READY")&&driver.alive(id)))return prior;
+            if(prior!=null&&driver.alive(id)){prior.error="Waiting for the released client to exit";return prior;}
+            long occupied=jobs.values().stream().filter(job->job.pending()||job.phase.equals("READY")||driver.alive(job.id)).count();
+            if(occupied>=maxInstances){
+                Job idle=jobs.values().stream().filter(job->job.phase.equals("READY")&&!driver.protectedInstance(job.id))
+                    .min(Comparator.comparingLong(job->job.readyAt)).orElse(null);
+                if(idle!=null)release(idle.id);
+                if(idle==null||driver.alive(idle.id)) {Job denied=new Job(id);denied.phase="FAILED";denied.error="Prewarm resource budget is full; retry after another preparation finishes";jobs.put(id,denied);return denied;}
+            }
             Job job=new Job(id);jobs.put(id,job);
             try{job.helper=driver.prepare(id);job.deadline=now+120000;}catch(Exception e){fail(job,e);}
             return job;
@@ -291,9 +389,11 @@ public class EpochHost {
         }
         void tick(long now){
             for(Job job:jobs.values())try{
-                if(job.phase.equals("FAILED"))continue;
+                if(job.phase.equals("FAILED")||job.phase.equals("RELEASED"))continue;
                 if(job.phase.equals("READY")){
                     if(!driver.alive(job.id))fail(job,new IllegalStateException("Prewarmed instance exited"));
+                    else if(driver.protectedInstance(job.id))job.readyAt=now;
+                    else if(now-job.readyAt>=idleMillis)release(job.id);
                     continue;
                 }
                 if(now>=job.deadline)throw new TimeoutException(job.id+" during "+job.phase);
@@ -313,7 +413,7 @@ public class EpochHost {
                     }
                 }else if(state.has("commandId")&&job.commandId.equals(state.get("commandId").getAsString())){
                     if(phase.equals("ERROR"))throw new IllegalStateException(job.id+": "+state);
-                    if(phase.equals("FROZEN"))job.phase="READY";
+                    if(phase.equals("FROZEN")){job.phase="READY";job.readyAt=now;}
                 }
             }catch(Exception e){fail(job,e);}
         }
@@ -325,11 +425,18 @@ public class EpochHost {
         void cancelPending(){
             for(Job job:jobs.values())if(job.pending())fail(job,new CancellationException("Host closing"));
         }
+        void release(String id){
+            Job job=jobs.get(id);if(job==null||driver.protectedInstance(id))return;
+            if(job.helper!=null&&job.helper.isAlive())job.helper.destroyForcibly();
+            driver.abort(id);job.phase="RELEASED";job.error="";
+        }
     }
     static final class Adopted extends EpochHost {
         final Path seedPath,sourceControl;
         final JsonObject seed;
-        final String sourceId,sessionId;
+        final String sourceId,sessionId,worldId;
+        boolean worldClosed;
+        boolean sourceWorldClosed;
         final long sourcePid;
         final ProcessHandle sourceProcess;
         final Map<String,String> versions=new HashMap<>();
@@ -350,17 +457,19 @@ public class EpochHost {
             }
             public String freeze(String id,JsonObject ready)throws Exception{
                 attach(id,new HWND(new Pointer(ready.get("windowHandle").getAsLong())));
-                return command(id,"freeze",null);
+                return command(id,"freeze",null,"");
             }
             public void abort(String id){
                 if(id.equals(sourceId)||id.equals(active))return;
                 Process process=processes.get(id);if(process!=null&&process.isAlive())process.destroyForcibly();
                 windows.remove(id);
             }
+            public boolean protectedInstance(String id){return id.equals(sourceId)||id.equals(active)||id.equals(pendingTarget);}
         });
         Adopted(Path root,Path seedPath)throws Exception{
             super(root,false);this.seedPath=seedPath.toAbsolutePath();seed=read(this.seedPath);
             sourceId=seed.get("instanceId").getAsString();sessionId=seed.get("sessionId").getAsString();
+            worldId=seed.has("worldId")?seed.get("worldId").getAsString():"";
             sourceControl=Path.of(seed.get("controlDir").getAsString());sourcePid=seed.get("pid").getAsLong();
             sourceProcess=ProcessHandle.of(sourcePid).filter(ProcessHandle::isAlive).orElseThrow(()->new IllegalStateException("Adopted source process is not alive"));
             if(System.currentTimeMillis()-Files.getLastModifiedTime(seedPath).toMillis()>300000)throw new IllegalStateException("Expired adoption seed");
@@ -380,6 +489,8 @@ public class EpochHost {
         @Override boolean alive(String id){return id.equals(sourceId)?sourceProcess.isAlive():super.alive(id);}
         @Override void poll()throws Exception{
             if(!sourceProcess.isAlive())throw new CancellationException("Original Minecraft process closed");
+            if(Files.exists(sourceControl.resolve("session-stop-"+sessionId+".json"))){sourceWorldClosed=worldClosed=true;closing=true;throw new CancellationException("Original world session closed");}
+            if(!active.equals(sourceId)&&Files.exists(control(active).resolve("session-stop-"+sessionId+".json"))){worldClosed=true;closing=true;throw new CancellationException("Active world session closed");}
             if(!closing&&acceptingWarmups){readWarmupRequests();warmups.tick(System.currentTimeMillis());}
             resize();
             // SetParent retains the original top-level HWND, which Windows can refocus
@@ -389,7 +500,7 @@ public class EpochHost {
         }
         @Override void status()throws Exception{
             JsonObject j=new JsonObject();j.addProperty("phase",phase);j.addProperty("adoptedRoot",true);
-            j.addProperty("sessionId",sessionId);j.addProperty("rootInstanceId",sourceId);j.addProperty("activeInstanceId",active);
+            j.addProperty("sessionId",sessionId);j.addProperty("worldId",worldId);j.addProperty("rootInstanceId",sourceId);j.addProperty("activeInstanceId",active);
             j.addProperty("activeVersion",versions.getOrDefault(active,active));j.addProperty("sourcePID",sourcePid);
             j.addProperty("hostHwnd",host==null?0:Pointer.nativeValue(host.getPointer()));j.addProperty("targetId",pendingTarget);
             j.addProperty("heartbeat",System.currentTimeMillis());j.addProperty("heartbeatTimestamp",java.time.Instant.now().toString());
@@ -444,7 +555,7 @@ public class EpochHost {
         }
         @Override void saveSession()throws Exception{
             JsonObject j=new JsonObject();j.addProperty("schema",2);j.addProperty("sessionId",sessionId);j.addProperty("sourceInstanceId",sourceId);
-            j.addProperty("activeInstanceId",active);j.addProperty("activeVersion",versions.get(active));j.addProperty("updatedAt",java.time.Instant.now().toString());
+            j.addProperty("worldId",worldId);j.addProperty("activeInstanceId",active);j.addProperty("activeVersion",versions.get(active));j.addProperty("updatedAt",java.time.Instant.now().toString());
             write(epoch.resolve("session/session.json"),j);
         }
         JsonObject targetEntry(String id)throws Exception{
@@ -478,6 +589,7 @@ public class EpochHost {
                     try{
                         JsonObject request=read(path);Files.deleteIfExists(path);
                         if(!request.has("sessionId")||!sessionId.equals(request.get("sessionId").getAsString()))continue;
+                        if("releaseWarmup".equals(request.get("action").getAsString())){warmups.release(request.get("targetId").getAsString());continue;}
                         if(!"warmup".equals(request.get("action").getAsString()))continue;
                         warmup(request.get("targetId").getAsString());
                     }catch(NoSuchFileException|AccessDeniedException ignored){}
@@ -502,33 +614,16 @@ public class EpochHost {
             if(closing)throw new CancellationException("Host closing");
             if(!job.phase.equals("READY"))throw new IllegalStateException(job.error);
         }
+        @Override String sessionIdentity(){return sessionId;}
+        @Override String worldIdentity(){return worldId;}
+        @Override void stopStandby(String id)throws Exception{
+            if(id.equals(sourceId))throw new IllegalStateException("Original root state is uncertain; preserve the committed recovery checkpoint");
+            stopOwned(id);if(alive(id))throw new IllegalStateException("Owned standby did not stop");
+        }
         void switchTo(String target)throws Exception{
-            if(target==null||target.isBlank())throw new IllegalArgumentException("Adopted switch requires targetId");
-            if(target.equals(active))return;
-            String source=active;boolean frozen=false;pendingTarget=target;phase="PREPARING";error="";status();
-            try{
-                prepare(target);validateStreamingPair(source,target);phase="SWITCHING";status();long started=System.nanoTime();exportMillis=importRenderMillis=revealResumeMillis=0;
-                Path snapshot=epoch.resolve("session/snapshot.json.gz");Files.createDirectories(snapshot.getParent());
-                Files.deleteIfExists(control(source).resolve("frozen.png"));frozen=true;
-                waitFor(source,command(source,"export",snapshot),Set.of("EXPORTED"),30000);freezeFrame(source);
-                exportMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-started);long imported=System.nanoTime();
-                waitFor(target,command(target,"import",snapshot),Set.of("IMPORTED"),30000);
-                importRenderMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-imported);long revealed=System.nanoTime();
-                active=target;reveal();action(target,"resume","READY");saveSession();
-                revealResumeMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-revealed);switchMillis=TimeUnit.NANOSECONDS.toMillis(System.nanoTime()-started);
-                phase="READY";log("Adopted switch committed "+source+" -> "+target+" in "+switchMillis+" ms");
-            }catch(Exception failure){
-                error=failure.toString();log("Adopted switch failed: "+error);
-                if(!sourceProcess.isAlive())throw failure;
-                if(frozen){
-                    if(alive(target))try{action(target,"freeze","FROZEN");}catch(Exception freezeFailure){
-                        if(target.equals(sourceId)){phase="ERROR";error+="; original root state uncertain: "+freezeFailure;status();return;}
-                        stopOwned(target);if(alive(target)){phase="ERROR";status();return;}
-                    }
-                    active=source;reveal();action(source,"resume","READY");
-                }else if(!target.equals(sourceId))stopOwned(target);
-                phase="READY";
-            }finally{pendingTarget="";status();}
+            if(target==null||target.isBlank())throw new IllegalArgumentException("Select a target instance");
+            pendingTarget=target;
+            try{performHandoff(target,()->prepare(target));}finally{pendingTarget="";status();}
         }
         void handle(JsonObject j)throws Exception{
             String action=j.get("action").getAsString();
@@ -537,7 +632,13 @@ public class EpochHost {
                 if(j.has("sessionId")&&sessionId.equals(j.get("sessionId").getAsString())&&j.has("targetId"))warmup(j.get("targetId").getAsString());
                 return;
             }
+            if(action.equals("releaseWarmup")){
+                if(j.has("sessionId")&&sessionId.equals(j.get("sessionId").getAsString())&&j.has("targetId"))warmups.release(j.get("targetId").getAsString());
+                return;
+            }
             if(action.equals("switch")){
+                if(!j.has("sessionId")||!sessionId.equals(j.get("sessionId").getAsString()))return;
+                if(j.has("worldId")&&!worldId.equals(j.get("worldId").getAsString()))return;
                 if(!j.has("targetId")){error="Select an instance: targetId is required";status();return;}
                 switchTo(j.get("targetId").getAsString());
             }
@@ -564,19 +665,20 @@ public class EpochHost {
             log("Adopted coordinator shutdown; original process is unowned");
             acceptingWarmups=false;
             warmups.cancelPending();
+            if(worldClosed&&!sourceWorldClosed&&sourceProcess.isAlive())try{
+                transactionId="";command(sourceId,"leaveworld",null);
+            }catch(Exception leaveFailure){log("Original world needs manual exit: "+leaveFailure);}
             // Do not kill or reparent a user-launched root, including error paths.
             // Before an explicit helper shutdown, bring the latest world back to
             // the root if possible so leaving the helper does not lose a handoff.
-            if(sourceProcess.isAlive())try{
+            if(sourceProcess.isAlive()&&!worldClosed)try{
                 closing=false;
                 Files.deleteIfExists(epoch.resolve("host-command.json"));
                 if(!active.equals(sourceId)&&alive(active)){
-                    Path snapshot=epoch.resolve("session/snapshot.json.gz");
-                    waitFor(active,command(active,"export",snapshot),Set.of("EXPORTED"),30000);
-                    waitFor(sourceId,command(sourceId,"import",snapshot),Set.of("IMPORTED"),30000);
-                    active=sourceId;reveal();saveSession();
-                }
-                action(sourceId,"resume","READY");
+                    // A return is a fresh reverse transaction from the current authoritative state.
+                    if(phase.equals("READY"))performHandoff(sourceId,()->{});
+                    else log("Preserving recovery checkpoint; uncertain handoff cannot directly resume the old root");
+                }else if(phase.equals("READY"))action(sourceId,"resume","READY");
             }catch(Exception e){log("Unable to restore original root during shutdown: "+e);}finally{closing=true;}
             for(String id:new ArrayList<>(processes.keySet()))stopOwned(id);
             if(clippingInstalled&&User32.INSTANCE.IsWindow(host)){
